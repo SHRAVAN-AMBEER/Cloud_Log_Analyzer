@@ -1,11 +1,38 @@
 import json
 import boto3
+from datetime import datetime
 from datetime import datetime, timedelta
 from collections import defaultdict
 from botocore.exceptions import ClientError
 
+# S3 client
 # AWS Clients
 s3 = boto3.client('s3')
+
+# Cross-account role ARN
+CROSS_ACCOUNT_ROLE_ARN = "arn:aws:iam::502881461360:role/DynamoDBCrossAccountRole"
+
+
+# 🔐 Assume role and get DynamoDB access
+def get_dynamodb():
+    sts_client = boto3.client('sts')
+
+    assumed_role = sts_client.assume_role(
+        RoleArn=CROSS_ACCOUNT_ROLE_ARN,
+        RoleSessionName="LambdaSession"
+    )
+
+    credentials = assumed_role['Credentials']
+
+    dynamodb = boto3.resource(
+        'dynamodb',
+        aws_access_key_id=credentials['AccessKeyId'],
+        aws_secret_access_key=credentials['SecretAccessKey'],
+        aws_session_token=credentials['SessionToken']
+    )
+
+    return dynamodb
+
 dynamodb = boto3.resource('dynamodb')
 
 # DynamoDB Tables (Week 4-5)
@@ -286,6 +313,12 @@ def lambda_handler(event, context):
     print("🚀 Lambda started - WEEK 5 Advanced Anomaly Detection")
     
     try:
+        # 🔗 Connect to DynamoDB
+        dynamodb = get_dynamodb()
+        logs_table = dynamodb.Table('ProcessedLogs')
+        alerts_table = dynamodb.Table('SecurityAlerts')
+
+        # 📦 Get S3 file
         # Validate event structure
         if 'Records' not in event or not event['Records']:
             return {
