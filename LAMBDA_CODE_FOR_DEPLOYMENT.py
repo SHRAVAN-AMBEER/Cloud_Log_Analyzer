@@ -1,54 +1,43 @@
 import json
 import boto3
-import pickle
-import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict
 from botocore.exceptions import ClientError
-import io
-import uuid
-# S3 client
+
 # AWS Clients
 s3 = boto3.client('s3')
 
-# Cross-account role ARN
+# 🔐 Cross-Account Role ARN (Friends AWS Account)
 CROSS_ACCOUNT_ROLE_ARN = "arn:aws:iam::502881461360:role/DynamoDBCrossAccountRole"
 
 
-# 🔐 Assume role and get DynamoDB access
 def get_dynamodb():
-    sts_client = boto3.client('sts')
+    """🔐 Assume cross-account role and return DynamoDB resource"""
+    try:
+        sts_client = boto3.client('sts')
+        assumed_role = sts_client.assume_role(
+            RoleArn=CROSS_ACCOUNT_ROLE_ARN,
+            RoleSessionName='cross-account-anomaly-detection'
+        )
+        
+        credentials = assumed_role['Credentials']
+        dynamodb = boto3.resource(
+            'dynamodb',
+            region_name='us-east-1',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        return dynamodb
+    except ClientError as e:
+        print(f"❌ Error assuming cross-account role: {e}")
+        raise
 
-    assumed_role = sts_client.assume_role(
-        RoleArn=CROSS_ACCOUNT_ROLE_ARN,
-        RoleSessionName="LambdaSession"
-    )
 
-    credentials = assumed_role['Credentials']
-
-    dynamodb = boto3.resource(
-        'dynamodb',
-        aws_access_key_id=credentials['AccessKeyId'],
-        aws_secret_access_key=credentials['SecretAccessKey'],
-        aws_session_token=credentials['SessionToken']
-    )
-
-    return dynamodb
-
-dynamodb = boto3.resource('dynamodb')
-
-# DynamoDB Tables (Week 4-5)
+# Initialize DynamoDB via assumed role
+dynamodb = get_dynamodb()
 ALERTS_TABLE = dynamodb.Table('SecurityAlerts')
 PROCESSED_LOGS_TABLE = dynamodb.Table('ProcessedLogs')
-
-# ========== WEEK 6: ML MODEL CONFIGURATION ==========
-ML_MODEL_BUCKET = 'cloud-log-analyzer'
-ML_MODEL_KEY = 'ml_model/isolation_forest.pkl'
-ALPHA = 0.6  # Weight for rule-based score (60%), ML gets 40%
-ml_model = None  # Global model cache
-
-# Feature definitions
-FEATURES = ['login_hour', 'failed_attempts', 'ip_count', 'failure_ratio']
 
 # Configuration
 BATCH_SIZE = 25  # DynamoDB batch write limit
@@ -56,151 +45,6 @@ FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 TIME_WINDOW_MINUTES = 15
 MAX_LOGINS_PER_MINUTE = 10
-
-
-# ========== WEEK 6: ML MODEL LOADING ==========
-def load_ml_model():
-    """
-    Load trained Isolation Forest model from S3
-    Uses global cache to avoid reloading on every invocation
-    """
-    global ml_model
-    
-    if ml_model is not None:
-        print("✅ ML model already loaded (cached)")
-        return ml_model
-    
-    try:
-        print(f"📦 Loading ML model from S3: s3://{ML_MODEL_BUCKET}/{ML_MODEL_KEY}")
-        
-        response = s3.get_object(Bucket=ML_MODEL_BUCKET, Key=ML_MODEL_KEY)
-        model_data = response['Body'].read()
-        
-        ml_model = pickle.loads(model_data)
-        print("✅ ML model loaded successfully!")
-        return ml_model
-    
-    except Exception as e:
-        print(f"⚠️ Failed to load ML model: {e}")
-        print("⚠️ Falling back to rule-based detection only")
-        return None
-
-
-def extract_user_features(logs, username):
-    """
-    Extract features for a specific user from logs
-    Returns: feature vector [login_hour, failed_attempts, ip_count, failure_ratio]
-    """
-    user_logs = [log for log in logs if log.get('username') == username]
-    
-    if not user_logs:
-        return np.zeros(len(FEATURES))
-    
-    features = np.zeros(len(FEATURES))
-    
-    # Feature 0: login_hour (hour of day, normalized to 0-24)
-    hours = []
-    for log in user_logs:
-        try:
-            ts = datetime.fromisoformat(log.get('timestamp', '').replace('Z', '+00:00'))
-            hours.append(ts.hour)
-        except (ValueError, AttributeError):
-            pass
-    if hours:
-        features[0] = np.mean(hours)
-    
-    # Feature 1: failed_attempts (raw count)
-    failed = sum(1 for log in user_logs if log.get('status') == 'failure')
-    features[1] = float(failed)
-    
-    # Feature 2: ip_count (number of unique IPs)
-    unique_ips = len(set(log.get('ip', 'UNKNOWN') for log in user_logs if log.get('ip')))
-    features[2] = float(unique_ips)
-    
-    # Feature 3: failure_ratio (failed / total)
-    total = len(user_logs)
-    if total > 0:
-        features[3] = failed / total
-    else:
-        features[3] = 0.0
-    
-    return features
-
-
-def calculate_rule_based_score(alert_count):
-    """
-    Calculate rule-based anomaly score (Sr) from alert count
-    Converts rule-based detections to a normalized score: [-1, 1]
-    
-    - 0 alerts: Sr = -1 (normal)
-    - 1 alert: Sr = -0.5 (slightly suspicious)
-    - 2 alerts: Sr = 0.0 (neutral)
-    - 3+ alerts: Sr = 0.5+ (suspicious to critical)
-    """
-    if alert_count == 0:
-        return -1.0
-    elif alert_count == 1:
-        return -0.5
-    elif alert_count == 2:
-        return 0.0
-    else:
-        return min(0.5 + (alert_count - 3) * 0.25, 1.0)
-
-
-def calculate_ml_score(model, features_vector):
-    """
-    Calculate ML anomaly score (Sa) using trained model
-    Model.decision_function returns score (typically -1 to 1)
-    Negative = normal, Positive = anomalous
-    """
-    if model is None:
-        print("⚠️ ML model not available, using default score")
-        return 0.0
-    
-    try:
-        features_reshaped = features_vector.reshape(1, -1)
-        score = model.decision_function(features_reshaped)[0]
-        return float(np.clip(score, -1.0, 1.0))
-    except Exception as e:
-        print(f"⚠️ Error calculating ML score: {e}")
-        return 0.0
-
-
-def calculate_hybrid_score(rule_score, ml_score, alpha=ALPHA):
-    """
-    Calculate hybrid anomaly score
-    Sh = alpha * Sr + (1 - alpha) * Sa
-    
-    Args:
-        rule_score (float): Rule-based anomaly score [-1, 1]
-        ml_score (float): ML anomaly score [-1, 1]
-        alpha (float): Weight for rule-based score (default 0.6)
-    
-    Returns:
-        float: Hybrid score in range [-1, 1]
-    """
-    hybrid = alpha * rule_score + (1 - alpha) * ml_score
-    return np.clip(hybrid, -1.0, 1.0)
-
-
-def convert_to_risk_score(hybrid_score):
-    """
-    Convert hybrid score [-1, 1] to risk score [0, 100]
-    risk_score = int((Sh + 1) * 50)
-    """
-    return int((hybrid_score + 1) * 50)
-
-
-def get_risk_level(risk_score):
-    """Determine risk level from risk score"""
-    if risk_score < 30:
-        return 'LOW'
-    elif risk_score < 60:
-        return 'MEDIUM'
-    elif risk_score < 85:
-        return 'HIGH'
-    else:
-        return 'CRITICAL'
 
 
 def batch_write_to_dynamodb(table, items):
@@ -260,7 +104,6 @@ def calculate_severity(threat_type, count):
 def create_alert_item(username, ip, threat_type, severity, count, additional_data=None):
     """Create a standardized alert item"""
     alert = {
-        'id': uuid.uuid4().hex,
         'user_id': username,
         'timestamp': datetime.utcnow().isoformat() + 'Z',
         'ip': ip,
@@ -461,30 +304,16 @@ def detect_account_lockout_patterns(logs):
 
 def lambda_handler(event, context):
     """
-    WEEK 6: Lambda with ML + Rule-Based Hybrid Anomaly Detection
-    - 7 detection rules (Sr)
-    - ML Isolation Forest model (Sa)
-    - Hybrid scoring (Sh = 0.6*Sr + 0.4*Sa)
-    - Risk scoring (0-100)
+    WEEK 5: Enhanced Lambda with advanced anomaly detection
+    - 7 detection rules
     - Batch DynamoDB writes (performance optimized)
+    - Comprehensive error handling
+    - Edge case validation
     """
-    print("🚀 Lambda started - WEEK 6 ML + Hybrid Anomaly Detection")
+    print("🚀 Lambda started - WEEK 5 Advanced Anomaly Detection")
     
     try:
-        # 📦 Load ML Model
-        print("🤖 Loading ML model...")
-        model = load_ml_model()
-        if model:
-            print("✅ ML model ready for inference")
-        else:
-            print("⚠️ Running in rule-based mode only")
-        
-        # 🔗 Connect to DynamoDB
-        dynamodb = get_dynamodb()
-        logs_table = dynamodb.Table('ProcessedLogs')
-        alerts_table = dynamodb.Table('SecurityAlerts')
-
-        # 📦 Get S3 file
+        # Validate event structure
         if 'Records' not in event or not event['Records']:
             return {
                 "statusCode": 400,
@@ -538,48 +367,24 @@ def lambda_handler(event, context):
                 })
             }
         
-        # ========== WEEK 6: FEATURE EXTRACTION & ML SCORING ==========
-        print("\n🤖 Extracting features and calculating ML scores...")
-        
-        # Get unique users
-        users = set(log.get('username', 'UNKNOWN') for log in logs)
-        user_features = {}
-        user_ml_scores = {}
-        
-        for username in users:
-            features = extract_user_features(logs, username)
-            user_features[username] = features
-            
-            # Calculate ML anomaly score (Sa)
-            ml_score = calculate_ml_score(model, features)
-            user_ml_scores[username] = ml_score
-            
-            if model:
-                print(f"  {username}: features={features.round(2)}, Sa={ml_score:.3f}")
-        
-        # Prepare processed items with ML scores
+        # Prepare batch write items
         processed_items = []
         for log in logs:
-            username = log.get('username', 'UNKNOWN')
-            ml_score = user_ml_scores.get(username, 0.0)
-            
             processed_items.append({
-                'user_id': username,
+                'user_id': log.get('username', 'UNKNOWN'),
                 'timestamp': log.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
                 'ip': log.get('ip', 'UNKNOWN'),
                 'threat_flag': False,
                 'user_agent': log.get('user_agent', 'UNKNOWN'),
                 'login_status': log.get('status', 'unknown'),
-                'processed_at': datetime.utcnow().isoformat() + 'Z',
-                'ml_score': ml_score  # WEEK 6: Add ML score
+                'processed_at': datetime.utcnow().isoformat() + 'Z'
             })
         
-        # Batch write processed logs
+        # Batch write processed logs (optimized)
         logs_written = batch_write_to_dynamodb(PROCESSED_LOGS_TABLE, processed_items)
         print(f"✅ Stored {logs_written}/{len(logs)} logs in ProcessedLogs table")
         
         # Run all 7 anomaly detection rules
-        print("\n📋 Running rule-based detection rules...")
         all_alerts = []
         
         all_alerts.extend(detect_multiple_failed_logins(logs))
@@ -590,7 +395,7 @@ def lambda_handler(event, context):
         all_alerts.extend(detect_new_location_login(logs))
         all_alerts.extend(detect_account_lockout_patterns(logs))
         
-        # Remove duplicate alerts
+        # Remove duplicate alerts (same user_id, timestamp, alert_type)
         seen = set()
         unique_alerts = []
         for alert in all_alerts:
@@ -599,54 +404,11 @@ def lambda_handler(event, context):
                 seen.add(key)
                 unique_alerts.append(alert)
         
-        print(f"🔍 Detection complete: {len(unique_alerts)} unique alerts from rules")
+        print(f"🔍 Detection complete: {len(unique_alerts)} unique alerts")
         
-        # ========== WEEK 6: HYBRID SCORING ==========
-        print("\n🎯 Computing hybrid scores and risk levels...")
-        
-        # Group alerts by user for scoring
-        user_alerts = defaultdict(list)
-        for alert in unique_alerts:
-            user_alerts[alert['user_id']].append(alert)
-        
-        # Calculate hybrid scores for all users
-        for username in users:
-            alert_count = len(user_alerts.get(username, []))
-            rule_score = calculate_rule_based_score(alert_count)
-            ml_score = user_ml_scores.get(username, 0.0)
-            
-            # WEEK 6: Calculate hybrid score
-            hybrid_score = calculate_hybrid_score(rule_score, ml_score, alpha=ALPHA)
-            risk_score = convert_to_risk_score(hybrid_score)
-            risk_level = get_risk_level(risk_score)
-            
-            # WEEK 7: Explanation Engine
-            features = user_features.get(username, np.zeros(len(FEATURES)))
-            reasons = []
-            if features[0] >= 22 or features[0] < 6:
-                reasons.append("unusual_login_time")
-            if features[2] > 1:
-                reasons.append("multiple_ips")
-            if features[3] > 0.7:
-                reasons.append("high_failure_rate")
-            if ml_score < 0:
-                reasons.append("ml_anomaly")
-            
-            # Update all alerts for this user with hybrid score
-            for alert in user_alerts.get(username, []):
-                alert['anomaly_score'] = ml_score           # Sa (ML score)
-                alert['rule_score'] = rule_score            # Sr (Rule score)
-                alert['hybrid_score'] = hybrid_score         # Sh (Hybrid)
-                alert['final_score'] = hybrid_score          # Final hybrid score
-                alert['risk_score'] = risk_score             # 0-100
-                alert['risk_level'] = risk_level             # LOW/MEDIUM/HIGH/CRITICAL
-                alert['reasons'] = reasons                   # WEEK 7: Reasons
-
-            print(f"  {username}: Sr={rule_score:.3f}, Sa={ml_score:.3f}, Sh={hybrid_score:.3f}, Risk={risk_score} ({risk_level}), Reasons={reasons}")
-        
-        # Batch write alerts with hybrid scores
+        # Batch write alerts (optimized)
         alerts_written = batch_write_to_dynamodb(ALERTS_TABLE, unique_alerts)
-        print(f"✅ Stored {alerts_written}/{len(unique_alerts)} alerts with hybrid scores")
+        print(f"✅ Stored {alerts_written}/{len(unique_alerts)} alerts in SecurityAlerts table")
         
         # Success response
         return {
@@ -656,17 +418,13 @@ def lambda_handler(event, context):
                 "logs_stored": logs_written,
                 "alerts_detected": alerts_written,
                 "invalid_logs": invalid_count,
-                "message": "WEEK 6: ML + Hybrid anomaly detection complete",
-                "rules_executed": 7,
-                "ml_model_loaded": model is not None,
-                "alpha": ALPHA
+                "message": "WEEK 5: Advanced anomaly detection complete",
+                "rules_executed": 7
             })
         }
     
     except Exception as e:
         print(f"❌ Critical error: {e}")
-        import traceback
-        traceback.print_exc()
         return {
             "statusCode": 500,
             "body": json.dumps({"error": str(e)})

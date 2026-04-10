@@ -1,9 +1,13 @@
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, jsonify
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import boto3
+from flask_cors import CORS
+from boto3.dynamodb.conditions import Key, Attr
 
 app = Flask(__name__)
+CORS(app)
 
 BASE_DIR = Path(__file__).parent
 LOGS_DIR = BASE_DIR / "logs"
@@ -51,6 +55,55 @@ def login():
         return render_template("login.html", message="Login successful!", status=status)
     else:
         return render_template("login.html", message="Login failed", status=status), 401
+
+
+# INITIALIZE BOTO3
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+ALERTS_TABLE_NAME = 'SecurityAlerts'
+
+def format_alert(item):
+    """Format alert to the STANDARDIZED API OUTPUT"""
+    return {
+        "user_id": item.get('user_id', 'UNKNOWN'),
+        "risk_score": int(item.get('risk_score', 0)),
+        "risk_level": item.get('risk_level', 'LOW'),
+        "reasons": item.get('reasons', []),
+        "timestamp": item.get('timestamp', '')
+    }
+
+@app.route("/alerts", methods=["GET"])
+def get_alerts():
+    try:
+        table = dynamodb.Table(ALERTS_TABLE_NAME)
+        response = table.scan()
+        alerts = [format_alert(i) for i in response.get('Items', [])]
+        return jsonify(alerts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/alerts/high", methods=["GET"])
+def get_high_alerts():
+    try:
+        table = dynamodb.Table(ALERTS_TABLE_NAME)
+        response = table.scan(
+            FilterExpression=Attr('risk_level').is_in(['HIGH', 'CRITICAL'])
+        )
+        alerts = [format_alert(i) for i in response.get('Items', [])]
+        return jsonify(alerts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/alerts/<user_id>", methods=["GET"])
+def get_user_alerts(user_id):
+    try:
+        table = dynamodb.Table(ALERTS_TABLE_NAME)
+        response = table.scan(
+            FilterExpression=Attr('user_id').eq(user_id)
+        )
+        alerts = [format_alert(i) for i in response.get('Items', [])]
+        return jsonify(alerts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

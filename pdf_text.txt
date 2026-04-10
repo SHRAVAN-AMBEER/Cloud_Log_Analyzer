@@ -1,0 +1,280 @@
+​📦 🚀 PROJECT HANDOVER (SEND THIS​
+​TO SHRAVAN)​
+​📌 1. WHAT HAS BEEN BUILT​
+​We now have a​​working SIEM pipeline with ML + rules​:​
+​S3 (logs)​
+​↓​
+​log-analyzer-lambda (parsing + rules + feature extraction)​
+​↓​
+​ml-lambda-function (Isolation Forest inference)​
+​↓​
+​Hybrid scoring (ML + rules)​
+​↓​
+​DynamoDB (alerts storage)​
+​🧠 2. CORE IDEA​
+​System detects anomalies using:​
+​✅ Rule-based detection​
+​●​ ​Multiple failed logins​
+​●​ ​High failure ratio​
+​●​ ​Multiple IP usage​
+​✅ ML-based detection​
+​●​ ​Isolation Forest (trained offline)​
+​●​ ​Detects behavioral anomalies​
+​✅ Hybrid system​
+​Final Decision = ML + Rules​
+
+​📁 3. WHERE EVERYTHING IS​
+​🔹 ML MODEL (IMPORTANT)​
+​●​ ​File:​​model.joblib​
+​●​ ​Location (local dev):​
+​lambda-layer-docker/model.joblib​
+​●​ ​Deployed inside:​
+​ml-lambda Docker container​
+​👉 Model is​​pre-trained (offline)​
+​👉 Lambda ONLY does inference (no training)​
+​🔹 ML LAMBDA​
+​●​ ​Name:​
+​ml-lambda-function​
+​●​ ​Type:​
+​Docker (ECR image)​
+​Input:​
+​{​
+​"features": [[hour, failed, ip_count, failure_ratio]]​
+​}​
+​Output:​
+​{​
+​"predictions": [-1, 1],​
+​"scores": [...]​
+​}​
+
+​🔹 LOG ANALYZER LAMBDA​
+​●​ ​Name:​
+​log-analyzer-lambda​
+​Responsibilities:​
+​●​ ​Read logs from S3​
+​●​ ​Parse JSON logs​
+​●​ ​Extract features​
+​●​ ​Apply rule-based detection​
+​●​ ​Call ML Lambda​
+​●​ ​Combine results (hybrid scoring)​
+​●​ ​Store alerts in DynamoDB​
+​🔹 S3 BUCKET​
+​●​ ​Bucket:​
+​mini-siem-raw-logs-lakshman​
+​Path format:​
+​raw-logs/auth/YYYY/MM/DD/file.json​
+​🔹 DYNAMODB (IN YOUR ACCOUNT)​
+​Table stores alerts like:​
+​{​
+​"id": "uuid",​
+​"user_id": "user1",​
+​"timestamp": "...",​
+​"risk_score": 85,​
+​"severity": "HIGH",​
+​"reasons": ["high_failure_ratio", "ml_anomaly"]​
+​}​
+
+​⚙️ 4. WHAT YOU (LAKSHMAN)​
+​IMPLEMENTED​
+​●​ ​End-to-end pipeline ✔​
+​●​ ​ML model training (offline) ✔​
+​●​ ​Docker deployment ✔​
+​●​ ​Lambda integration ✔​
+​●​ ​Hybrid scoring ✔​
+​●​ ​Alert storage ✔​
+​🎯 5. WHAT SHRAVAN NEEDS TO DO​
+​NOW​
+​🔥 MAIN TASK: ALERTS/DYNAMODB​
+​UPDATION/FRONTEND / VISUALIZATION​
+​🚀 📦 SHRAVAN — COMPLETE​
+​WORKFLOW (FINAL TASK LIST)​
+​🎯 YOUR ROLE NOW​
+​You are handling:​
+​🧠​​Intelligence Layer + Presentation Layer (UI + Alerts​​+ DB + API)​
+​Lakshman has already built:​
+​●​ ​ML model ✔​
+​●​ ​Lambda pipeline ✔​
+​●​ ​Feature extraction ✔​
+​●​ ​Hybrid detection ✔​
+​👉 You DO NOT touch ML core or pipeline.​
+
+​🧩 SYSTEM YOU WILL WORK ON​
+​DynamoDB (alerts)​
+​↓​
+​Backend API (you)​
+​↓​
+​Dashboard (you)​
+​↓​
+​Visualization + Alerts (you)​
+​📅 ✅ YOUR FINAL TASKS (CLEANED &​
+​ORDERED)​
+​🔥 WEEK 7 — ALERT INTELLIGENCE​
+​(START HERE)​
+​🎯 Goal: Make alerts meaningful (not just numbers)​
+​✅ 1. Build Explanation Engine​
+​For each alert, generate reasons like:​
+​- unusual_login_time​
+​- new_ip_detected​
+​- high_failure_rate​
+​- multiple_ips​
+​- ml_anomaly​
+​✅ 2. Logic (IMPORTANT)​
+
+​Map features → reasons:​
+​Condition​
+​Reason​
+​login_hour abnormal​
+​unusual_login_time​
+​ip_count > threshold​
+​multiple_ips​
+​failure_ratio > 0.7​
+​high_failure_rate​
+​new IP (future)​
+​new_ip_detected​
+​ML prediction = -1​
+​ml_anomaly​
+​✅ 3. Store in DynamoDB​
+​Each alert must include:​
+​{​
+​"reasons": ["ml_anomaly", "high_failure_rate"]​
+​}​
+​✅ 4. Improve Alert Output (VERY IMPORTANT)​
+​Include:​
+​{​
+​"risk_score": 85,​
+​"risk_level": "HIGH",​
+​"reasons": [...]​
+​}​
+​🔥 WEEK 8 — RISK SCORING SYSTEM​
+​🎯 Goal: Convert raw scores → meaningful risk​
+
+​✅ 1. Risk Score Formula​
+​Use:​
+​risk_score = int((Sh + 1) * 50)​
+​Where:​
+​●​ ​Sh = hybrid score​
+​✅ 2. Risk Levels​
+​Define:​
+​0 – 30   → LOW​
+​30 – 70  → MEDIUM​
+​70 – 100 → HIGH​
+​✅ 3. Store in DynamoDB​
+​Add fields:​
+​{​
+​"risk_score": 85,​
+​"risk_level": "HIGH"​
+​}​
+​🔥 WEEK 8 — DATABASE UPGRADE​
+​🎯 Goal: Improve alert schema​
+​✅ Update DynamoDB Schema​
+​Each item should be:​
+
+​{​
+​"id": "uuid",​
+​"user_id": "...",​
+​"timestamp": "...",​
+​"risk_score": 85,​
+​"risk_level": "HIGH",​
+​"reasons": ["ml_anomaly", "multiple_ips"]​
+​}​
+​⚠️ IMPORTANT​
+​●​ ​Do NOT break old data​
+​●​ ​Make fields optional-safe​
+​🔥 WEEK 9 — BACKEND API (VERY​
+​IMPORTANT)​
+​🎯 Goal: Serve data to dashboard​
+​✅ Build API (Flask / FastAPI)​
+​Endpoints:​
+​1. Get all alerts​
+​GET /alerts​
+​2. Get high-risk alerts​
+​GET /alerts/high​
+​3. Get user-specific alerts​
+​GET /alerts/{user_id}​
+
+​✅ Response Format (STANDARDIZE THIS)​
+​{​
+​"user_id": "user1",​
+​"risk_score": 85,​
+​"risk_level": "HIGH",​
+​"reasons": ["ml_anomaly", "high_failure_rate"],​
+​"timestamp": "..."​
+​}​
+​🔥 WEEK 9 — DASHBOARD (MAIN TASK)​
+​🎯 Goal: Visual SIEM dashboard​
+​✅ Build Dashboard (Streamlit or React)​
+​📊 Required Visuals​
+​1. Risk Level Distribution​
+​●​ ​Pie chart (LOW / MEDIUM / HIGH)​
+​2. High Risk Users​
+​●​ ​Table or bar chart​
+​3. Alert Timeline​
+​●​ ​Alerts over time​
+​4. Alert Table​
+
+​Show:​
+​●​ ​user_id​
+​●​ ​risk_score​
+​●​ ​risk_level​
+​●​ ​reasons​
+​🔥 WEEK 10 — TESTING & VALIDATION​
+​🎯 Goal: Prove system works​
+​✅ Simulate Attacks​
+​1. Brute Force​
+​●​ ​many failures → HIGH​
+​2. Multiple IP login​
+​●​ ​ip_count high → MEDIUM/HIGH​
+​3. Normal login​
+​●​ ​should be LOW​
+​✅ Validate:​
+​●​ ​ML detection ✔​
+​●​ ​Rule detection ✔​
+​●​ ​Hybrid scoring ✔​
+​●​ ​False positives minimal ✔​
+
+​🔐 6. HOW SHRAVAN CAN ACCESS YOUR​
+​AWS RESOURCES​
+​Since DynamoDB is in his account, but your Lambdas/S3 are separate:​
+​OPTION 1 (EASY — RECOMMENDED)​
+​👉 Share access via IAM:​
+​Create IAM user:​
+​Permissions:​
+​- Lambda Read​
+​- S3 Read​
+​- CloudWatch Read​
+​OPTION 2 (TEAM WORKFLOW)​
+​👉 You share:​
+​●​ ​S3 bucket logs​
+​●​ ​API output (optional)​
+​●​ ​Sample alerts​
+​👉 He uses DynamoDB locally in his AWS​
+​OPTION 3 (BEST FOR FINAL DEMO)​
+​👉 Move everything to ONE account (his)​
+​●​ ​Export your Lambda code​
+​●​ ​Export Docker image​
+​●​ ​Re-deploy in his AWS​
+
+​🧪 7. HOW TO TEST SYSTEM​
+​Upload file to S3:​
+​{"username":"user1","timestamp":"...","ip":"...","status":"failure"}​
+​Expected:​
+​●​ ​Lambda triggered ✔​
+​●​ ​ML invoked ✔​
+​●​ ​Alerts stored ✔​
+​📊 8. ALERT SYSTEM LOGIC​
+​Alert is created when:​
+​ML prediction = -1​
+​OR​
+​Rule condition triggered​
+​Hybrid logic:​
+​High failure ratio → HIGH​
+​ML anomaly → MEDIUM​
+​Both → HIGH++​
+​🧠 9. IMPORTANT CONCEPTS TO​
+​UNDERSTAND​
+​Shravan must know:​
+​●​ ​ML is NOT trained in Lambda​
+​●​ ​Model is static (joblib)​
+
+​●​ ​Features drive ML​
+​●​ ​Rules + ML = better accuracy​
