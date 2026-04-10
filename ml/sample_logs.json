@@ -1,0 +1,16 @@
+[
+  {"username": "user1", "timestamp": "2026-03-31T10:00:00Z", "ip": "1.1.1.1", "status": "success"},
+  {"username": "user1", "timestamp": "2026-03-31T10:05:00Z", "ip": "1.1.1.1", "status": "success"},
+
+  {"username": "user2", "timestamp": "2026-03-31T02:00:00Z", "ip": "2.2.2.2", "status": "failure"},
+  {"username": "user2", "timestamp": "2026-03-31T02:01:00Z", "ip": "2.2.2.2", "status": "failure"},
+  {"username": "user2", "timestamp": "2026-03-31T02:02:00Z", "ip": "2.2.2.2", "status": "failure"},
+  {"username": "user2", "timestamp": "2026-03-31T02:03:00Z", "ip": "2.2.2.2", "status": "failure"},
+
+  {"username": "user3", "timestamp": "2026-03-31T14:00:00Z", "ip": "3.3.3.3", "status": "success"},
+  {"username": "user3", "timestamp": "2026-03-31T14:05:00Z", "ip": "4.4.4.4", "status": "success"},
+  {"username": "user3", "timestamp": "2026-03-31T14:10:00Z", "ip": "5.5.5.5", "status": "success"},
+
+  {"username": "user4", "timestamp": "2026-03-31T23:30:00Z", "ip": "6.6.6.6", "status": "success"},
+  {"username": "user4", "timestamp": "2026-03-31T23:35:00Z", "ip": "6.6.6.6", "status": "success"}
+]
