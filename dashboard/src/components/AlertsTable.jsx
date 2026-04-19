@@ -11,6 +11,7 @@ export const AlertsTable = ({ alerts }) => (
           <tr>
             <th>User</th>
             <th>Timestamp</th>
+            <th>Log Source</th>
             <th>Risk Score</th>
             <th>Risk Level</th>
             <th>Trigger Reasons</th>
@@ -31,6 +32,13 @@ export const AlertsTable = ({ alerts }) => (
                 {alert.timestamp ? new Date(alert.timestamp).toLocaleString() : 'N/A'}
               </td>
               <td>
+                {alert.log_sources && alert.log_sources.length > 0 ? (
+                  alert.log_sources.map((s, i) => <span key={i} className="reason-tag" style={{ backgroundColor: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.3)' }}>{s.replace(/_/g, ' ')}</span>)
+                ) : (
+                  <span className="reason-tag" style={{ backgroundColor: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.3)' }}>Custom API</span>
+                )}
+              </td>
+              <td>
                 <span style={{ fontWeight: 600 }}>{alert.risk_score}</span>
               </td>
               <td>
@@ -49,7 +57,7 @@ export const AlertsTable = ({ alerts }) => (
           ))}
           {alerts.length === 0 && (
             <tr>
-              <td colSpan="5" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+              <td colSpan="6" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                 No alerts detected. The system is secure.
               </td>
             </tr>

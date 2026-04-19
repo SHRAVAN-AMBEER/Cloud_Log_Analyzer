@@ -5,6 +5,9 @@ from collections import defaultdict
 from botocore.exceptions import ClientError
 from decimal import Decimal
 import uuid
+import urllib.request
+import urllib.error
+import re
 
 # AWS Clients
 s3 = boto3.client('s3')
@@ -39,6 +42,7 @@ def get_dynamodb():
 FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 MAX_LOGINS_PER_MINUTE = 10
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/YOUR_DUMMY_URL_HERE"
 
 # =========================
 # UTILS
@@ -61,9 +65,64 @@ def batch_write_to_dynamodb(table, items):
 
     return written
 
-def validate_log_entry(log):
-    required_fields = ['username', 'timestamp', 'ip', 'status']
-    return all(log.get(field) for field in required_fields)
+class UniversalLogParser:
+    @staticmethod
+    def parse(line):
+        if not line or not line.strip(): return None
+        try:
+            log_dict = json.loads(line)
+            if 'username' in log_dict and 'ip' in log_dict and 'status' in log_dict:
+                log_dict['log_source'] = log_dict.get('log_source', 'Custom_Auth_API')
+                return log_dict
+            if 'userIdentity' in log_dict and 'eventName' in log_dict:
+                return {
+                    'username': log_dict['userIdentity'].get('userName', 'UNKNOWN'), 'ip': log_dict.get('sourceIPAddress', 'UNKNOWN'),
+                    'status': 'success' if log_dict.get('responseElements', {}).get('ConsoleLogin') == 'Success' else 'failure',
+                    'timestamp': log_dict.get('eventTime', datetime.utcnow().isoformat() + 'Z'), 'log_source': 'AWS_CloudTrail'
+                }
+        except:
+            pass
+        apache_match = re.match(r'^(?P<ip>\S+) \S+ (?P<user>\S+) \[(?P<time>.*?)\] ".*?" (?P<status>\d+)', line)
+        if apache_match:
+            d = apache_match.groupdict()
+            return {
+                'username': d['user'] if d['user'] != '-' else 'UNKNOWN', 'ip': d['ip'],
+                'status': 'success' if d['status'].startswith('2') or d['status'].startswith('3') else 'failure',
+                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Apache_WebServer'
+            }
+        syslog_match = re.search(r'SRC=(?P<ip>\S+).*?USER=(?P<user>\S+).*?STATUS=(?P<status>success|failure|failed|accepted)', line, re.IGNORECASE)
+        if syslog_match:
+            d = syslog_match.groupdict()
+            return {
+                'username': d['user'], 'ip': d['ip'],
+                'status': 'success' if 'accept' in d['status'].lower() or 'success' in d['status'].lower() else 'failure',
+                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Cisco_Firewall'
+            }
+        return None
+
+def send_slack_alert(alert):
+    if not SLACK_WEBHOOK_URL or "YOUR_DUMMY_URL_HERE" in SLACK_WEBHOOK_URL:
+        print("⚠️ Slack webhook not configured. Skipping alert.")
+        return
+
+    try:
+        payload = {
+            "text": f"🚨 *CRITICAL SECURITY ALERT* 🚨\n"
+                    f"*User:* `{alert.get('user_id', 'UNKNOWN')}`\n"
+                    f"*IP:* `{alert.get('ip', 'UNKNOWN')}`\n"
+                    f"*Type:* {alert.get('alert_type', 'UNKNOWN')}\n"
+                    f"*Risk Score:* {alert.get('risk_score', 'N/A')}\n"
+                    f"*Reasons:* {', '.join(alert.get('reasons', []))}"
+        }
+        req = urllib.request.Request(
+            SLACK_WEBHOOK_URL,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        urllib.request.urlopen(req, timeout=3)
+        print("✅ Slack alert dispatched")
+    except Exception as e:
+        print(f"❌ Slack error: {e}")
 
 
 # =========================
@@ -247,22 +306,31 @@ def lambda_handler(event, context):
         alerts_table = dynamodb.Table('SecurityAlerts')
 
         if 'Records' not in event or not event['Records']:
-            return {"statusCode": 400, "body": json.dumps({"error": "No S3 records in event"})}
-
-        bucket = event['Records'][0]['s3']['bucket']['name']
-        key = event['Records'][0]['s3']['object']['key']
-
-        response = s3.get_object(Bucket=bucket, Key=key)
-        content = response['Body'].read().decode('utf-8')
+            return {"statusCode": 400, "body": json.dumps({"error": "No records in event"})}
 
         logs = []
-        for line in content.splitlines():
-            try:
-                log = json.loads(line)
-                if validate_log_entry(log):
-                    logs.append(log)
-            except:
-                continue
+        user_sources = defaultdict(set)
+        
+        is_sqs = 'eventSource' in event['Records'][0] and event['Records'][0]['eventSource'] == 'aws:sqs'
+        
+        if is_sqs:
+            for record in event['Records']:
+                body = record.get('body', '')
+                parsed = UniversalLogParser.parse(body)
+                if parsed:
+                    logs.append(parsed)
+                    user_sources[parsed.get('username')].add(parsed.get('log_source', 'Unknown'))
+        else:
+            # S3 Fallback (Original Behavior)
+            bucket = event['Records'][0]['s3']['bucket']['name']
+            key = event['Records'][0]['s3']['object']['key']
+            response = s3.get_object(Bucket=bucket, Key=key)
+            content = response['Body'].read().decode('utf-8')
+            for line in content.splitlines():
+                parsed = UniversalLogParser.parse(line)
+                if parsed:
+                    logs.append(parsed)
+                    user_sources[parsed.get('username')].add(parsed.get('log_source', 'Unknown'))
 
         print(f"✅ Parsed {len(logs)} logs")
 
@@ -328,7 +396,17 @@ def lambda_handler(event, context):
             })
 
         batch_write_to_dynamodb(logs_table, processed_items)
-        batch_write_to_dynamodb(alerts_table, hybrid_alerts + rule_alerts)
+        all_alerts = hybrid_alerts + rule_alerts
+        for al in all_alerts:
+            al['log_sources'] = list(user_sources.get(al['user_id'], ['Custom_Auth_API']))
+        batch_write_to_dynamodb(alerts_table, all_alerts)
+
+        # ================= SOAR ORCHESTRATION =================
+        for alert in all_alerts:
+            if alert.get('risk_level') in ['HIGH', 'CRITICAL']:
+                print(f"🔥 SOAR Triggered: Sending Alert for {alert.get('user_id')}")
+                send_slack_alert(alert)
+                # Here we could also push the IP to a Banned_IPs DynamoDB table.
 
         print(f"✅ Stored {len(hybrid_alerts) + len(rule_alerts)} total alerts")
 
