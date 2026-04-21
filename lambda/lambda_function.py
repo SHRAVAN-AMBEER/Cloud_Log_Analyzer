@@ -1,3 +1,8 @@
+# SQS TRIGGER SETTINGS (set in AWS Console):
+# Batch size: 10-100 messages per invocation
+# Batch window: 5 seconds
+# This ensures ML model receives enough logs to detect behavioral patterns
+import os
 import json
 import boto3
 from datetime import datetime
@@ -42,7 +47,6 @@ def get_dynamodb():
 FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 MAX_LOGINS_PER_MINUTE = 10
-import os
 
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
@@ -82,7 +86,7 @@ class UniversalLogParser:
                     'status': 'success' if log_dict.get('responseElements', {}).get('ConsoleLogin') == 'Success' else 'failure',
                     'timestamp': log_dict.get('eventTime', datetime.utcnow().isoformat() + 'Z'), 'log_source': 'AWS_CloudTrail'
                 }
-        except:
+        except Exception:
             pass
         apache_match = re.match(r'^(?P<ip>\S+) \S+ (?P<user>\S+) \[(?P<time>.*?)\] ".*?" (?P<status>\d+)', line)
         if apache_match:
@@ -133,17 +137,20 @@ def send_slack_alert(alert):
 def detect_multiple_failed_logins(logs):
     alerts = []
     failed_count = defaultdict(int)
+    ip_company = {}  # track company per (user, ip) key
 
     for log in logs:
         if log.get('status') == 'failure':
-            key = (log['username'], log['ip'])
+            key = (log.get('username', 'UNKNOWN'), log.get('ip', 'UNKNOWN'))
             failed_count[key] += 1
+            ip_company[key] = log.get('company_id', 'UNKNOWN')
 
     for (user, ip), count in failed_count.items():
         if count >= FAILED_LOGIN_THRESHOLD:
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': user,
+                'company_id': ip_company.get((user, ip), 'UNKNOWN'),  # ✅
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': ip,
                 'alert_type': 'MULTIPLE_FAILED_LOGINS',
@@ -158,16 +165,20 @@ def detect_multiple_failed_logins(logs):
 def detect_password_spray(logs):
     alerts = []
     ip_users = defaultdict(set)
+    ip_company = {}
 
     for log in logs:
         if log.get('status') == 'failure':
-            ip_users[log['ip']].add(log['username'])
+            ip = log.get('ip', 'UNKNOWN')
+            ip_users[ip].add(log.get('username', 'UNKNOWN'))
+            ip_company[ip] = log.get('company_id', 'UNKNOWN')
 
     for ip, users in ip_users.items():
         if len(users) >= PASSWORD_SPRAY_THRESHOLD:
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': 'SYSTEM',
+                'company_id': ip_company.get(ip, 'UNKNOWN'),
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': ip,
                 'alert_type': 'PASSWORD_SPRAY',
@@ -182,12 +193,15 @@ def detect_password_spray(logs):
 def detect_velocity_abuse(logs):
     alerts = []
     user_times = defaultdict(list)
+    user_company = {}
 
     for log in logs:
         try:
-            ts = datetime.fromisoformat(log['timestamp'].replace('Z', '+00:00'))
-            user_times[log['username']].append(ts)
-        except:
+            ts = datetime.fromisoformat(log.get('timestamp', '').replace('Z', '+00:00'))
+            user = log.get('username', 'UNKNOWN')
+            user_times[user].append(ts)
+            user_company[user] = log.get('company_id', 'UNKNOWN')
+        except Exception:
             continue
 
     for user, times in user_times.items():
@@ -195,6 +209,7 @@ def detect_velocity_abuse(logs):
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': user,
+                'company_id': user_company.get(user, 'UNKNOWN'),
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': 'UNKNOWN',
                 'alert_type': 'VELOCITY_ABUSE',
@@ -211,26 +226,30 @@ def detect_velocity_abuse(logs):
 # FEATURE EXTRACTION
 # =========================
 def extract_features(logs):
+    # Key = (username, company_id) to keep tenants separate
     user_data = defaultdict(list)
-
     for log in logs:
-        user_data[log['username']].append(log)
+        key = (log.get('username', 'UNKNOWN'), log.get('company_id', 'UNKNOWN'))
+        user_data[key].append(log)
 
-    features = []
-    usernames = []
+    features, usernames, company_ids = [], [], []
 
-    for user, entries in user_data.items():
+    for (user, company_id), entries in user_data.items():
         total = len(entries)
-        failed = sum(1 for e in entries if e['status'] == 'failure')
-        ips = set(e['ip'] for e in entries)
+        failed = sum(1 for e in entries if e.get('status') == 'failure')
+        ips = set(e.get('ip', 'UNKNOWN') for e in entries)
 
-        latest = max(entries, key=lambda x: x['timestamp'])
-        hour = datetime.fromisoformat(latest['timestamp'].replace('Z', '+00:00')).hour
+        latest = max(entries, key=lambda x: x.get('timestamp', ''))
+        try:
+            hour = datetime.fromisoformat(latest['timestamp'].replace('Z', '+00:00')).hour
+        except Exception:
+            hour = 12  # safe default
 
         features.append([hour, failed, len(ips), failed / total if total else 0])
         usernames.append(user)
+        company_ids.append(company_id)
 
-    return features, usernames
+    return features, usernames, company_ids
 
 
 # =========================
@@ -239,31 +258,34 @@ def extract_features(logs):
 def compute_risk(feature, ml_score):
     login_hour, failed_attempts, ip_count, failure_ratio = feature
 
-    # Rule Score
-    Sr = 0
-    if failed_attempts > 3:
-        Sr += 0.4
-    if failure_ratio > 0.5:
-        Sr += 0.3
-    if ip_count > 3:
-        Sr += 0.3
+    # ── Rule-Based Score ──────────────────────────────────────────
+    Sr = 0.0
+    if failed_attempts > 3:    Sr += 0.4
+    if failure_ratio > 0.5:    Sr += 0.3
+    if ip_count > 3:           Sr += 0.3
+    Sr = min(1.0, Sr)
 
-    # ML Score
-    Sa = -ml_score
-    Sa = max(0, min(1, Sa))
+    # ── ML Score (FIXED normalization) ───────────────────────────
+    # IsolationForest scores: negative = anomaly, positive = normal
+    # Normalize from [-0.5, +0.5] range to [0, 1] where 1 = most anomalous
+    # Formula: Sa = 0.5 - ml_score  (inverts and centers)
+    Sa = 0.5 - ml_score          # e.g., score=-0.2 → Sa=0.7 (anomalous)
+    Sa = max(0.0, min(1.0, Sa))  # clamp to [0,1]
 
-    # Final Score
-    alpha = 0.6
+    # ── Hybrid Score ─────────────────────────────────────────────
+    alpha = 0.6   # 60% rule-based, 40% ML
     Sh = alpha * Sr + (1 - alpha) * Sa
-
     risk_score = int(Sh * 100)
 
-    if risk_score < 30:
+    # ── Risk Level with CRITICAL tier ────────────────────────────
+    if risk_score < 25:
         level = "LOW"
-    elif risk_score < 70:
+    elif risk_score < 55:
         level = "MEDIUM"
-    else:
+    elif risk_score < 80:
         level = "HIGH"
+    else:
+        level = "CRITICAL"
 
     return risk_score, level, Sr, Sa
 
@@ -287,7 +309,7 @@ def generate_explanation(feature, Sa):
     if failed_attempts > 5:
         reasons.append("multiple_failed_attempts")
 
-    if Sa > 0.5:
+    if Sa > 0.6:
         reasons.append("ml_anomaly")
 
     if not reasons:
@@ -340,7 +362,14 @@ def lambda_handler(event, context):
             return {"statusCode": 200, "body": "No logs"}
 
         # ================= ML CALL =================
-        features, usernames = extract_features(logs)
+        if len(logs) < 3:
+            print(f"⚠️ Only {len(logs)} logs — ML detection skipped (need min 3 for pattern analysis)")
+            print("Rule-based detection will still run.")
+            features = []
+            usernames = []
+        else:
+            features, usernames, company_ids = extract_features(logs)
+            
         hybrid_alerts = []
         
         if features:
@@ -366,6 +395,7 @@ def lambda_handler(event, context):
                 hybrid_alerts.append({
                     'id': str(uuid.uuid4()),   
                     'user_id': usernames[i],
+                    'company_id': company_ids[i],      # ✅ TENANT TAG
                     'timestamp': datetime.utcnow().isoformat() + 'Z',
                     'ip': 'UNKNOWN',
                     'threat_flag': risk_score > 30,
@@ -390,17 +420,27 @@ def lambda_handler(event, context):
 
         for log in logs:
             processed_items.append({
+                'log_id': str(uuid.uuid4()),          # ✅ PRIMARY KEY — required
                 'user_id': log.get('username', 'UNKNOWN'),
                 'timestamp': log.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
                 'ip': log.get('ip', 'UNKNOWN'),
+                'company_id': log.get('company_id', 'UNKNOWN'),  # ✅ TENANT TAG
+                'log_source': log.get('log_source', 'Unknown'),
                 'threat_flag': False,
                 'login_status': log.get('status', 'unknown')
             })
+
+        print(f"🧾 DB_DEBUG - Writing {len(processed_items)} logs with primary keys to DynamoDB (Sample):")
+        print(json.dumps(processed_items[:2], default=str))
 
         batch_write_to_dynamodb(logs_table, processed_items)
         all_alerts = hybrid_alerts + rule_alerts
         for al in all_alerts:
             al['log_sources'] = list(user_sources.get(al['user_id'], ['Custom_Auth_API']))
+            
+        print(f"🧾 DB_DEBUG - Writing {len(all_alerts)} alerts with tenant tags to DynamoDB (Sample):")
+        print(json.dumps(all_alerts[:2], default=str))
+        
         batch_write_to_dynamodb(alerts_table, all_alerts)
 
         # ================= SOAR ORCHESTRATION =================

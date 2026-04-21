@@ -14,7 +14,7 @@ model = IsolationForest(
 )
 
 # Train ONLY on baseline (normal data)
-model.fit(df)
+model.fit(df.values)
 
 # Save model
 joblib.dump(model, "model.joblib")

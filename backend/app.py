@@ -7,7 +7,6 @@ from flask_cors import CORS
 from boto3.dynamodb.conditions import Key, Attr
 import requests
 import random
-from boto3.dynamodb.conditions import Key, Attr
 import jwt
 from datetime import timedelta
 import io
@@ -138,7 +137,7 @@ def get_geo_info(ip):
                 geo = {"lat": data.get('lat'), "lon": data.get('lon'), "country": data.get('country')}
                 IP_CACHE[ip] = geo
                 return geo
-    except:
+    except Exception:
         pass
     
     # Fallback default
@@ -198,8 +197,8 @@ def filter_alerts_for_demo(alerts, company_id):
 def get_alerts():
     auth_data = check_auth()
     if not auth_data:
-         return jsonify([a for a in get_mock_alerts() if 'Apache_WebServer' in a.get('log_sources', [])]) # graceful fallback if token missing for local quick dev
-         
+        return jsonify([a for a in get_mock_alerts() if 'Apache_WebServer' in a.get('log_sources', [])])  # graceful fallback if token missing for local quick dev
+        
     print(f"🔒 Authenticated request from {auth_data['username']} (Tenant: {auth_data['company_id']})")
     
     target_tenant = auth_data['company_id']
@@ -226,7 +225,7 @@ def get_high_alerts():
         )
         alerts = [format_alert(i) for i in response.get('Items', [])]
         return jsonify(alerts)
-    except Exception as e:
+    except Exception:
         return jsonify([a for a in get_mock_alerts() if a['risk_level'] in ('HIGH', 'CRITICAL')])
 
 @app.route("/alerts/<user_id>", methods=["GET"])

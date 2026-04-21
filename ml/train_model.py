@@ -17,7 +17,7 @@ df = pd.DataFrame(features)
 print("📊 Features:\n", df)
 
 # Select ML columns
-X = df[["login_hour", "failed_attempts", "ip_count", "failure_ratio"]]
+X = df[["login_hour", "failed_attempts", "ip_count", "failure_ratio"]].values
 
 # Train model
 model = IsolationForest(
