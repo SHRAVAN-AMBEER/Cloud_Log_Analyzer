@@ -34,3 +34,33 @@ export const fetchAlerts = async (tenant = null) => {
     return [];
   }
 };
+
+export const downloadReport = async (tenant = null) => {
+  try {
+    const token = localStorage.getItem('siem_token');
+    let url = 'http://localhost:5000/api/report';
+    if (tenant) {
+      url += `?tenant=${tenant}`;
+    }
+    
+    const res = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (!res.ok) throw new Error('Failed to generate report');
+    
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `${tenant || 'Enterprise'}_Security_Report.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (error) {
+    console.error("Error downloading report:", error);
+    alert(`Failed to generate PDF document. Error: ${error.message}`);
+  }
+};

@@ -42,7 +42,9 @@ def get_dynamodb():
 FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 MAX_LOGINS_PER_MINUTE = 10
-SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/YOUR_DUMMY_URL_HERE"
+import os
+
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 # =========================
 # UTILS

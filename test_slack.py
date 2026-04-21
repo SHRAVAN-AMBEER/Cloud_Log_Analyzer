@@ -1,14 +1,19 @@
 import urllib.request
 import json
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # =====================================================================
 # ONLY PASTE YOUR URL HERE TO TEST IT LOCALLY BEFORE DEPLOYING!
-SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/YOUR_DUMMY_URL_HERE"
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 # =====================================================================
 
 def test_slack_webhook():
-    if "YOUR_DUMMY_URL" in SLACK_WEBHOOK_URL:
-        print("❌ You need to paste your Slack Webhook URL into the script first!")
+    if not SLACK_WEBHOOK_URL:
+        print("❌ You need to set SLACK_WEBHOOK_URL inside your .env file!")
         return
         
     print("🚀 Firing a mock CRITICAL alert to Slack...")

@@ -10,7 +10,7 @@ import { RiskDistributionChart } from '../components/RiskDistributionChart';
 import { TopUsersChart } from '../components/TopUsersChart';
 import { AlertsTable } from '../components/AlertsTable';
 import { ThreatMap } from '../components/ThreatMap';
-import { fetchAlerts } from '../services/api';
+import { fetchAlerts, downloadReport } from '../services/api';
 
 import '../styles/main.css';
 
@@ -115,6 +115,9 @@ export default function Dashboard() {
               ← Back to Tenants
             </button>
           )}
+          <button onClick={() => downloadReport(selectedTenant)} className="btn-primary" style={{ marginRight: '1rem', background: '#3b82f6' }}>
+            📄 Download Threat Report
+          </button>
           <button onClick={handleLogout} className="btn-primary" style={{ background: 'var(--danger-color)' }}>
             Logout
           </button>

@@ -4,16 +4,17 @@ import random
 import time
 from datetime import datetime
 
-# =======================================================
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ⚙️ AWS CONFIGURATION
-# 1. Your friend must create an IAM User with AmazonSQSFullAccess.
-# 2. Paste the Access Key and Secret Key below.
-# 3. Paste the SQS Queue URL below.
-# =======================================================
-AWS_ACCESS_KEY_ID = "YOUR_AWS_ACCESS_KEY"
-AWS_SECRET_ACCESS_KEY = "YOUR_AWS_SECRET_KEY"
+# Secrets are loaded dynamically from the .env file!
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = "us-east-1"
-SQS_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/002071550174/SIEM-Log-Stream"
+SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL")
 
 # Connect to SQS remotely
 try:
