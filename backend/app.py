@@ -10,6 +10,11 @@ import random
 import jwt
 from datetime import timedelta
 import io
+import os
+import uuid
+import smtplib
+import bcrypt
+from email.mime.text import MIMEText
 from flask import send_file
 from fpdf import FPDF
 
@@ -65,32 +70,8 @@ def login():
 
 
 # ================= MULTI-TENANT SAAS AUTH =================
-JWT_SECRET = "super-secret-enterprise-key-123!"
-
-@app.route("/api/login", methods=["POST"])
-def api_login():
-    """Generates a secure Multi-Tenant JWT for API consumption"""
-    data = request.get_json() or {}
-    username = data.get("username", "").strip()
-    password = data.get("password", "")
-
-    valid_users = {
-        "admin": {"role": "super_admin", "company_id": "ALL"},
-        "hospital": {"role": "customer", "company_id": "HOSPITAL"},
-        "retail": {"role": "customer", "company_id": "RETAIL"}
-    }
-
-    if username in valid_users and password == "password123":
-        user_data = valid_users[username]
-        token = jwt.encode({
-            "username": username,
-            "role": user_data["role"],
-            "company_id": user_data["company_id"],
-            "exp": datetime.now(timezone.utc) + timedelta(hours=24)
-        }, JWT_SECRET, algorithm="HS256")
-        return jsonify({"token": token, "message": "Authenticated successfully", "role": user_data["role"], "company_id": user_data["company_id"]})
-    
-    return jsonify({"error": "Invalid credentials"}), 401
+JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-enterprise-key-123!")
+SUPER_ADMIN_PASSWORD = os.getenv("SUPER_ADMIN_PASSWORD", "admin123")
 
 def check_auth():
     """Validates JWT Token to simulate Multi-Tenant Isolation"""
@@ -98,13 +79,195 @@ def check_auth():
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
         try:
-            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            return decoded
+            return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         except jwt.ExpiredSignatureError:
-            return None
+            return {"error": "Token has expired"}
         except jwt.InvalidTokenError:
-            return None
+            return {"error": "Invalid token"}
     return None
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    data = request.get_json() or {}
+    company_name = data.get("company_name", "").strip()
+    email = data.get("email", "").strip()
+    password = data.get("password", "")
+    industry = data.get("industry", "Unknown").strip().upper()
+    
+    if not company_name or not email or not password:
+        return jsonify({"error": "Missing required fields"}), 400
+        
+    table = dynamodb.Table('Companies')
+    try:
+        existing = table.scan(FilterExpression=Attr('email').eq(email))
+        if existing.get('Items'):
+            return jsonify({"error": "Email already registered"}), 409
+    except Exception as e:
+        print(f"Error checking duplicate: {e}")
+        
+    rand_id = str(random.randint(100, 999))
+    prefix = industry.replace(' ', '_').upper()[:10] if industry else "COMP"
+    company_id = f"{prefix}_{rand_id}"
+    
+    try:
+        while table.get_item(Key={'company_id': company_id}).get('Item'):
+            rand_id = str(random.randint(100, 999))
+            company_id = f"{prefix}_{rand_id}"
+    except Exception:
+        pass
+        
+    api_key = f"sk-live-{str(uuid.uuid4())}"
+    hashed_pwd = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    
+    item = {
+        "company_id": company_id,
+        "company_name": company_name,
+        "api_key": api_key,
+        "email": email,
+        "password_hash": hashed_pwd,
+        "registered_at": datetime.now(timezone.utc).isoformat() + 'Z',
+        "industry": industry,
+        "alert_email_enabled": True,
+        "status": "active"
+    }
+    
+    try:
+        table.put_item(Item=item)
+        return jsonify({
+            "message": "Registration successful",
+            "company_id": company_id,
+            "api_key": api_key
+        }), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json() or {}
+    company_id = data.get("company_id", "").strip()
+    password = data.get("password", "")
+    api_key = data.get("api_key", "").strip()
+    
+    if data.get("username") == "superadmin":
+        if password == SUPER_ADMIN_PASSWORD:
+            token = jwt.encode({
+                "role": "super_admin",
+                "company_id": "ALL",
+                "company_name": "Super Admin",
+                "exp": datetime.now(timezone.utc) + timedelta(hours=24)
+            }, JWT_SECRET, algorithm="HS256")
+            return jsonify({"token": token, "role": "super_admin", "company_id": "ALL", "company_name": "Super Admin"}), 200
+        return jsonify({"error": "Invalid super admin credentials"}), 401
+    
+    table = dynamodb.Table('Companies')
+    
+    if api_key:
+        try:
+            res = table.scan(FilterExpression=Attr('api_key').eq(api_key))
+            items = res.get('Items', [])
+            if not items:
+                return jsonify({"error": "Invalid API key"}), 401
+            company = items[0]
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        if not company_id or not password:
+            return jsonify({"error": "Provide company_id and password, or api_key"}), 400
+        try:
+            res = table.get_item(Key={'company_id': company_id})
+            company = res.get('Item')
+            if not company:
+                return jsonify({"error": "Invalid company_id"}), 401
+            if not bcrypt.checkpw(password.encode('utf-8'), company['password_hash'].encode('utf-8')):
+                return jsonify({"error": "Invalid password"}), 401
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+            
+    if company.get('status') != 'active':
+        return jsonify({"error": "Account suspended"}), 403
+
+    try:
+        table.update_item(
+            Key={'company_id': company['company_id']},
+            UpdateExpression="SET last_login = :val",
+            ExpressionAttributeValues={':val': datetime.now(timezone.utc).isoformat() + 'Z'}
+        )
+    except Exception:
+        pass
+        
+    token = jwt.encode({
+        "role": "customer",
+        "company_id": company['company_id'],
+        "company_name": company.get('company_name', 'Unknown'),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=24)
+    }, JWT_SECRET, algorithm="HS256")
+    
+    return jsonify({
+        "token": token,
+        "role": "customer",
+        "company_id": company['company_id'],
+        "company_name": company.get('company_name', 'Unknown')
+    }), 200
+
+@app.route("/api/companies", methods=["GET"])
+def api_companies():
+    auth = check_auth()
+    if not auth or "error" in auth:
+        return jsonify({"error": auth.get("error") if auth else "Unauthorized"}), 401
+    if auth.get("role") != "super_admin":
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        table = dynamodb.Table('Companies')
+        res = table.scan()
+        companies = [{
+            "company_id": i.get("company_id"),
+            "company_name": i.get("company_name"),
+            "industry": i.get("industry"),
+            "registered_at": i.get("registered_at"),
+            "status": i.get("status"),
+            "last_login": i.get("last_login"),
+            "alert_email_enabled": i.get("alert_email_enabled")
+        } for i in res.get('Items', [])]
+        return jsonify(companies), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/companies/<company_id>/send-alert-reminder", methods=["POST"])
+def send_alert_reminder(company_id):
+    auth = check_auth()
+    if not auth or "error" in auth or auth.get("role") != "super_admin":
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        table = dynamodb.Table('Companies')
+        company = table.get_item(Key={'company_id': company_id}).get('Item')
+        if not company:
+            return jsonify({"error": "Company not found"}), 404
+        recipient = company.get('email')
+        if not recipient:
+            return jsonify({"error": "Company has no registered email"}), 400
+            
+        sender = os.getenv("GMAIL_USER")
+        email_password = os.getenv("GMAIL_PASS")
+        if not sender or not email_password:
+            return jsonify({"error": "SMTP credentials not configured on backend"}), 500
+            
+        msg = MIMEText("Your Cloud Log Analyzer dashboard has detected high/critical anomalies in the last 24 hours that have not been reviewed. Please log in immediately at your dashboard to review your threat intelligence.")
+        msg["Subject"] = "⚠️ Security Alert: Unreviewed Anomalies in Your Dashboard"
+        msg["From"] = sender
+        msg["To"] = recipient
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender, email_password)
+            server.send_message(msg)
+            
+        table.update_item(
+            Key={'company_id': company_id},
+            UpdateExpression="SET last_alerted_at = :val",
+            ExpressionAttributeValues={':val': datetime.now(timezone.utc).isoformat() + 'Z'}
+        )
+        return jsonify({"message": f"Alert reminder sent successfully to {recipient}"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # INITIALIZE BOTO3
@@ -186,35 +349,35 @@ def get_mock_alerts():
         }
     ]
 
-def filter_alerts_for_demo(alerts, company_id):
-    if company_id == 'HOSPITAL':
-        return [a for a in alerts if 'Cisco_Firewall' in a.get('log_sources', [])]
-    if company_id == 'RETAIL':
-        return [a for a in alerts if 'AWS_CloudTrail' in a.get('log_sources', [])]
-    return alerts
-
 @app.route("/alerts", methods=["GET"])
 def get_alerts():
     auth_data = check_auth()
-    if not auth_data:
-        return jsonify([a for a in get_mock_alerts() if 'Apache_WebServer' in a.get('log_sources', [])])  # graceful fallback if token missing for local quick dev
-        
-    print(f"🔒 Authenticated request from {auth_data['username']} (Tenant: {auth_data['company_id']})")
+    if not auth_data or "error" in auth_data:
+        return jsonify({"error": auth_data.get("error") if auth_data else "Unauthorized"}), 401
     
-    target_tenant = auth_data['company_id']
-    if auth_data['role'] == 'super_admin' and request.args.get('tenant'):
-        target_tenant = request.args.get('tenant')
-        
+    company_id = auth_data['company_id']
+    
+    # Super admin can query any tenant
+    if auth_data['role'] == 'super_admin':
+        company_id = request.args.get('tenant', 'ALL')
+    
     try:
         table = dynamodb.Table(ALERTS_TABLE_NAME)
-        response = table.scan()
+        if company_id == 'ALL':
+            response = table.scan(Limit=500)
+        else:
+            # USE THE GSI — do NOT use scan()
+            response = table.query(
+                IndexName='company_id-timestamp-index',
+                KeyConditionExpression=Key('company_id').eq(company_id),
+                ScanIndexForward=False,
+                Limit=500
+            )
         alerts = [format_alert(i) for i in response.get('Items', [])]
-        filtered = filter_alerts_for_demo(alerts, target_tenant)
-        return jsonify(filtered)
+        return jsonify(alerts)
     except Exception as e:
-        print(f"⚠️ DynamoDB Error -> Enabling Showcase DEMO MODE: {e}")
-        alerts = get_mock_alerts()
-        return jsonify(filter_alerts_for_demo(alerts, target_tenant))
+        print(f"DynamoDB error: {e}")
+        return jsonify(get_mock_alerts()), 200
 
 @app.route("/alerts/high", methods=["GET"])
 def get_high_alerts():
@@ -253,12 +416,19 @@ def generate_pdf_report():
     # Fetch alerts for this tenant
     try:
         table = dynamodb.Table(ALERTS_TABLE_NAME)
-        response = table.scan()
-        alerts = [format_alert(i) for i in response.get('Items', [])]
-        filtered = filter_alerts_for_demo(alerts, target_tenant)
-    except Exception:
-        # Fallback to mock data if DynamoDB is unreachable
-        filtered = filter_alerts_for_demo(get_mock_alerts(), target_tenant)
+        if target_tenant == 'ALL':
+            response = table.scan(Limit=500)
+        else:
+            response = table.query(
+                IndexName='company_id-timestamp-index',
+                KeyConditionExpression=Key('company_id').eq(target_tenant),
+                ScanIndexForward=False,
+                Limit=500
+            )
+        filtered = [format_alert(i) for i in response.get('Items', [])]
+    except Exception as e:
+        print(f"PDF DynamoDB error: {e}")
+        filtered = get_mock_alerts()
 
     # Calculate metrics
     total_alerts = len(filtered)
