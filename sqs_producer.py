@@ -2,7 +2,7 @@ import boto3
 import json
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import argparse
 import os
 import sys
@@ -80,12 +80,9 @@ COMPANIES = {
     }
 }
 
-time_offset = 0
-
 def build_log(username, ip, status, company_id):
-    global time_offset
-    dt = datetime.utcnow() + timedelta(microseconds=time_offset)
-    time_offset += 1000  # Unique timestamp scaling
+    assert company_id, "company_id must not be empty"
+    dt = datetime.utcnow()
     return {
         "username": username,
         "ip": ip,
@@ -95,31 +92,37 @@ def build_log(username, ip, status, company_id):
         "company_id": company_id
     }
 
-def generate_normal_log(company_id, company_config):
-    user = random.choice(company_config['users'])
-    ip = random.choice(company_config['normal_ips']) if random.random() < 0.8 else random.choice(company_config['attack_ip_pool'])
-    status = "success" if random.random() < 0.9 else "failure"
-    return [build_log(user, ip, status, company_id)]
-
-def simulate_brute_force(company_id, company_config):
-    user = random.choice(company_config['users'])
-    ip = random.choice(company_config['attack_ip_pool'])
-    return [build_log(user, ip, "failure", company_id) for _ in range(10)]
-
-def simulate_password_spray(company_id, company_config):
-    ip = random.choice(company_config['attack_ip_pool'])
-    return [build_log(user, ip, "failure", company_id) for user in company_config['users']]
-
-def simulate_credential_stuffing(company_id, company_config):
-    user = random.choice(company_config['users'])
+def generate_logs_for_company(company_id, mode="mixed", count=None):
+    conf = COMPANIES[company_id]
+    count = count or random.randint(5, 10)
     logs = []
-    for _ in range(8):
-        status = random.choice(["success", "failure"]) if random.random() < 0.2 else "failure"
-        ip = random.choice(company_config['attack_ip_pool'])
+    
+    # Logic to determine if this specific company batch is an attack
+    is_attack = False
+    if mode == "attack_only":
+        is_attack = True
+    elif mode == "normal_only":
+        is_attack = False
+    else:
+        is_attack = random.random() < 0.3 # 30% chance of attack in mixed mode
+    
+    for _ in range(count):
+        if is_attack and random.random() < 0.7:
+            # Generate attack-like log
+            user = random.choice(conf['users'])
+            ip = random.choice(conf['attack_ip_pool'])
+            status = "failure"
+        else:
+            # Generate normal log
+            user = random.choice(conf['users'])
+            ip = random.choice(conf['normal_ips']) if random.random() < 0.9 else random.choice(conf['attack_ip_pool'])
+            status = "success" if random.random() < 0.95 else "failure"
+        
         logs.append(build_log(user, ip, status, company_id))
-    return logs
+    
+    return logs, is_attack
 
-def stream_logs(mode="mixed", target_company=None, dry_run=False):
+def stream_logs(mode="mixed", dry_run=False):
     try:
         if not dry_run:
             sqs = boto3.client(
@@ -132,62 +135,42 @@ def stream_logs(mode="mixed", target_company=None, dry_run=False):
         print(f"{RED}Failed to initialize boto3 client: {e}{RESET}")
         sys.exit(1)
 
-    print(f"Starting advanced stream {'(DRY RUN)' if dry_run else ''} -> {SQS_QUEUE_URL} | Mode: {mode}")
+    print(f"Starting structured multi-tenant stream {'(DRY RUN)' if dry_run else ''} -> {SQS_QUEUE_URL} | Mode: {mode}")
     
     total_sent = 0
-    attack_count = 0
 
     try:
         while True:
-            company_id = target_company if target_company else random.choice(list(COMPANIES.keys()))
-            comp_conf = COMPANIES[company_id]
-            batch_logs = []
+            # Structured Streaming: Iterate through each company
+            for company_id in COMPANIES.keys():
+                batch_logs, is_attack = generate_logs_for_company(company_id, mode=mode)
+                
+                # SQS Batch limit is 10
+                for i in range(0, len(batch_logs), 10):
+                    chunk = batch_logs[i:i+10]
+                    
+                    entries = [
+                        {
+                            "Id": str(j),
+                            "MessageBody": json.dumps(log)
+                        } for j, log in enumerate(chunk)
+                    ]
+
+                    color = RED if is_attack else GREEN
+                    print(f"{color}[PRODUCER][COMPANY] {company_id} → Sending batch of {len(chunk)} logs{RESET}")
+                    
+                    if not dry_run:
+                        sqs.send_message_batch(
+                            QueueUrl=SQS_QUEUE_URL,
+                            Entries=entries
+                        )
+                    
+                    total_sent += len(chunk)
             
-            is_attack = False
-
-            if mode == "normal_only":
-                batch_logs = generate_normal_log(company_id, comp_conf)
-            elif mode == "attack_only":
-                attack = random.choice(["brute_force", "password_spray", "credential_stuffing"])
-                if attack == "brute_force": batch_logs = simulate_brute_force(company_id, comp_conf)
-                elif attack == "password_spray": batch_logs = simulate_password_spray(company_id, comp_conf)
-                else: batch_logs = simulate_credential_stuffing(company_id, comp_conf)
-                is_attack = True
-            else:
-                # MIXED
-                rand_val = random.random()
-                if rand_val < 0.6:
-                    batch_logs = generate_normal_log(company_id, comp_conf)
-                elif rand_val < 0.8:
-                    batch_logs = simulate_brute_force(company_id, comp_conf)
-                    is_attack = True
-                elif rand_val < 0.9:
-                    batch_logs = simulate_password_spray(company_id, comp_conf)
-                    is_attack = True
-                else:
-                    batch_logs = simulate_credential_stuffing(company_id, comp_conf)
-                    is_attack = True
-
-            if is_attack:
-                attack_count += 1
-                color = RED
-            else:
-                color = GREEN
-
-            # Submit
-            for log_dict in batch_logs:
-                msg = json.dumps(log_dict)
-                if not dry_run:
-                    sqs.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=msg)
-                total_sent += 1
-                
-                print(f"{color}-> Sent: {msg[:85]}...{RESET}")
-                time.sleep(0.05) if not dry_run else time.sleep(0.01)
-
-            if total_sent % 10 == 0 or total_sent > 10:
-                print(f"{YELLOW}--- Sent {total_sent} logs | Companies active: {len(COMPANIES)} | Attacks simulated: {attack_count} ---{RESET}")
-                
-            time.sleep(1.5)
+            # Control Flow: Wait between full sweeps
+            wait_time = random.randint(5, 10)
+            print(f"{YELLOW}--- Sweep complete. Total sent: {total_sent} | Sleeping for {wait_time}s ---{RESET}")
+            time.sleep(wait_time)
 
     except KeyboardInterrupt:
         print(f"\n{YELLOW}🛑 Stream stopped manually. Total logs transmitted: {total_sent}{RESET}")
@@ -195,12 +178,7 @@ def stream_logs(mode="mixed", target_company=None, dry_run=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Multi-Tenant Cloud SIEM Log Producer')
     parser.add_argument('--mode', choices=['mixed', 'attack_only', 'normal_only'], default='mixed', help='Flow generation scheme')
-    parser.add_argument('--company', type=str, help='Force target a specific company ID')
     parser.add_argument('--dry-run', action='store_true', help='Print logs locally without SQS ingestion')
     args = parser.parse_args()
 
-    if args.company and args.company not in COMPANIES:
-        print(f"{RED}Error: Company '{args.company}' not found in configuration!{RESET}")
-        sys.exit(1)
-
-    stream_logs(mode=args.mode, target_company=args.company, dry_run=args.dry_run)
+    stream_logs(mode=args.mode, dry_run=args.dry_run)

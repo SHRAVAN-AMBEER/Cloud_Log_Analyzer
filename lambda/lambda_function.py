@@ -42,14 +42,24 @@ def get_dynamodb():
     return dynamodb
 
 # =========================
-# CONFIG
+# CONFIG & ENV VARS
 # =========================
+# Required Lambda Environment Variables:
+# SLACK_WEBHOOK_URL — Slack incoming webhook
+# CROSS_ACCOUNT_ROLE_ARN — IAM role for DynamoDB cross-account access
+# DEFAULT_COMPANY_ID — fallback company_id for logs without one
+# SES_SENDER_EMAIL — verified SES sender email
+# DASHBOARD_URL — URL of the React dashboard for email links
+
 FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 MAX_LOGINS_PER_MINUTE = 10
 
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-
+# Get Slack Webhook from environment variable (Security Best Practice)
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+DEFAULT_COMPANY_ID = "TECH_007"
+SES_SENDER_EMAIL = "security@example.com"
+DASHBOARD_URL = "http://localhost:5173"
 # =========================
 # UTILS
 # =========================
@@ -73,7 +83,7 @@ def batch_write_to_dynamodb(table, items):
 
 class UniversalLogParser:
     @staticmethod
-    def parse(line):
+    def _parse_raw(line):
         if not line or not line.strip(): return None
         try:
             log_dict = json.loads(line)
@@ -84,7 +94,8 @@ class UniversalLogParser:
                 return {
                     'username': log_dict['userIdentity'].get('userName', 'UNKNOWN'), 'ip': log_dict.get('sourceIPAddress', 'UNKNOWN'),
                     'status': 'success' if log_dict.get('responseElements', {}).get('ConsoleLogin') == 'Success' else 'failure',
-                    'timestamp': log_dict.get('eventTime', datetime.utcnow().isoformat() + 'Z'), 'log_source': 'AWS_CloudTrail'
+                    'timestamp': log_dict.get('eventTime', datetime.utcnow().isoformat() + 'Z'), 'log_source': 'AWS_CloudTrail',
+                    'company_id': log_dict.get('company_id')
                 }
         except Exception:
             pass
@@ -94,7 +105,8 @@ class UniversalLogParser:
             return {
                 'username': d['user'] if d['user'] != '-' else 'UNKNOWN', 'ip': d['ip'],
                 'status': 'success' if d['status'].startswith('2') or d['status'].startswith('3') else 'failure',
-                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Apache_WebServer'
+                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Apache_WebServer',
+                'company_id': 'UNKNOWN'
             }
         syslog_match = re.search(r'SRC=(?P<ip>\S+).*?USER=(?P<user>\S+).*?STATUS=(?P<status>success|failure|failed|accepted)', line, re.IGNORECASE)
         if syslog_match:
@@ -102,9 +114,31 @@ class UniversalLogParser:
             return {
                 'username': d['user'], 'ip': d['ip'],
                 'status': 'success' if 'accept' in d['status'].lower() or 'success' in d['status'].lower() else 'failure',
-                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Cisco_Firewall'
+                'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Cisco_Firewall',
+                'company_id': 'UNKNOWN'
             }
         return None
+
+    @staticmethod
+    def parse(line):
+        parsed = UniversalLogParser._parse_raw(line)
+        if not parsed:
+            return None
+            
+        company_id = parsed.get('company_id')
+        if not company_id or company_id == 'UNKNOWN':
+            # Try to grab it from original raw json again if missing
+            try:
+                log_dict = json.loads(line)
+                company_id = log_dict.get('company_id', 'UNKNOWN')
+            except Exception:
+                company_id = 'UNKNOWN'
+                
+        if company_id == 'UNKNOWN' and parsed.get('log_source') == 'AWS_CloudTrail':
+            company_id = DEFAULT_COMPANY_ID
+            
+        parsed['company_id'] = company_id
+        return parsed
 
 def send_slack_alert(alert):
     if not SLACK_WEBHOOK_URL or "YOUR_DUMMY_URL_HERE" in SLACK_WEBHOOK_URL:
@@ -114,11 +148,12 @@ def send_slack_alert(alert):
     try:
         payload = {
             "text": f"🚨 *CRITICAL SECURITY ALERT* 🚨\n"
+                    f"*Company:* `{alert.get('company_id', 'UNKNOWN')}`\n"
                     f"*User:* `{alert.get('user_id', 'UNKNOWN')}`\n"
                     f"*IP:* `{alert.get('ip', 'UNKNOWN')}`\n"
-                    f"*Type:* {alert.get('alert_type', 'UNKNOWN')}\n"
+                    f"*Risk Level:* {alert.get('risk_level')}\n"
                     f"*Risk Score:* {alert.get('risk_score', 'N/A')}\n"
-                    f"*Reasons:* {', '.join(alert.get('reasons', []))}"
+                    f"*Attack Pattern:* {', '.join(alert.get('reasons', []))}"
         }
         req = urllib.request.Request(
             SLACK_WEBHOOK_URL,
@@ -129,6 +164,9 @@ def send_slack_alert(alert):
         print("✅ Slack alert dispatched")
     except Exception as e:
         print(f"❌ Slack error: {e}")
+
+def send_company_email_alert(dynamodb, company_id, alert_count):
+    print(f"Lean: Skipping SES Email for now. Would send {alert_count} alerts for company {company_id}.")
 
 
 # =========================
@@ -228,16 +266,19 @@ def detect_velocity_abuse(logs):
 def extract_features(logs):
     # Key = (username, company_id) to keep tenants separate
     user_data = defaultdict(list)
+    user_last_ip = {}  # NEW: track last IP per (user, company_id)
+
     for log in logs:
         key = (log.get('username', 'UNKNOWN'), log.get('company_id', 'UNKNOWN'))
         user_data[key].append(log)
+        user_last_ip[key] = log.get('ip', 'UNKNOWN')  # keep overwriting = last IP
 
-    features, usernames, company_ids = [], [], []
+    features, usernames, company_ids, ips = [], [], [], []
 
     for (user, company_id), entries in user_data.items():
         total = len(entries)
         failed = sum(1 for e in entries if e.get('status') == 'failure')
-        ips = set(e.get('ip', 'UNKNOWN') for e in entries)
+        ip_set = set(e.get('ip', 'UNKNOWN') for e in entries)
 
         latest = max(entries, key=lambda x: x.get('timestamp', ''))
         try:
@@ -245,77 +286,42 @@ def extract_features(logs):
         except Exception:
             hour = 12  # safe default
 
-        features.append([hour, failed, len(ips), failed / total if total else 0])
+        features.append([hour, failed, len(ip_set), failed / total if total else 0])
         usernames.append(user)
         company_ids.append(company_id)
+        ips.append(user_last_ip.get((user, company_id), 'UNKNOWN'))
 
-    return features, usernames, company_ids
+    return features, usernames, company_ids, ips
 
 
 # =========================
 # HYBRID SCORING
 # =========================
-def compute_risk(feature, ml_score):
+def compute_risk(feature, ml_prediction):
     login_hour, failed_attempts, ip_count, failure_ratio = feature
-
-    # ── Rule-Based Score ──────────────────────────────────────────
-    Sr = 0.0
-    if failed_attempts > 3:    Sr += 0.4
-    if failure_ratio > 0.5:    Sr += 0.3
-    if ip_count > 3:           Sr += 0.3
-    Sr = min(1.0, Sr)
-
-    # ── ML Score (FIXED normalization) ───────────────────────────
-    # IsolationForest scores: negative = anomaly, positive = normal
-    # Normalize from [-0.5, +0.5] range to [0, 1] where 1 = most anomalous
-    # Formula: Sa = 0.5 - ml_score  (inverts and centers)
-    Sa = 0.5 - ml_score          # e.g., score=-0.2 → Sa=0.7 (anomalous)
-    Sa = max(0.0, min(1.0, Sa))  # clamp to [0,1]
-
-    # ── Hybrid Score ─────────────────────────────────────────────
-    alpha = 0.6   # 60% rule-based, 40% ML
-    Sh = alpha * Sr + (1 - alpha) * Sa
-    risk_score = int(Sh * 100)
-
-    # ── Risk Level with CRITICAL tier ────────────────────────────
-    if risk_score < 25:
-        level = "LOW"
-    elif risk_score < 55:
-        level = "MEDIUM"
-    elif risk_score < 80:
-        level = "HIGH"
-    else:
-        level = "CRITICAL"
-
-    return risk_score, level, Sr, Sa
-
-
-# =========================
-# EXPLANATION
-# =========================
-def generate_explanation(feature, Sa):
+    risk_score = 0
     reasons = []
-    login_hour, failed_attempts, ip_count, failure_ratio = feature
 
-    if login_hour < 6 or login_hour > 22:
-        reasons.append("unusual_login_time")
+    if ml_prediction == -1:
+        risk_score += 50
+        reasons.append("ml_anomaly_detected")
 
     if failure_ratio > 0.5:
+        risk_score += 20
         reasons.append("high_failure_rate")
 
     if ip_count > 3:
+        risk_score += 20
         reasons.append("multiple_ips")
 
-    if failed_attempts > 5:
-        reasons.append("multiple_failed_attempts")
+    if risk_score > 70:
+        level = "CRITICAL"
+    elif risk_score > 40:
+        level = "HIGH"
+    else:
+        level = "MEDIUM"
 
-    if Sa > 0.6:
-        reasons.append("ml_anomaly")
-
-    if not reasons:
-        reasons.append("normal_behavior")
-
-    return reasons
+    return risk_score, level, reasons
 
 
 # =========================
@@ -328,6 +334,7 @@ def lambda_handler(event, context):
         dynamodb = get_dynamodb()
         logs_table = dynamodb.Table('ProcessedLogs')
         alerts_table = dynamodb.Table('SecurityAlerts')
+
 
         if 'Records' not in event or not event['Records']:
             return {"statusCode": 400, "body": json.dumps({"error": "No records in event"})}
@@ -358,62 +365,98 @@ def lambda_handler(event, context):
 
         print(f"✅ Parsed {len(logs)} logs")
 
+        # ================= ARCHIVE TO S3 =================
+        if logs:
+            try:
+                timestamp_str = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                s3_key = f"raw-logs/auth/logs_{timestamp_str}_{str(uuid.uuid4())[:8]}.json"
+                s3_bucket = "mini-siem-raw-logs-lakshman"
+                
+                s3.put_object(
+                    Bucket=s3_bucket,
+                    Key=s3_key,
+                    Body=json.dumps(logs, default=str),
+                    ContentType='application/json'
+                )
+                print(f"📦 Archived {len(logs)} logs to s3://{s3_bucket}/{s3_key}")
+            except Exception as e:
+                print(f"⚠️ S3 Archive failed: {e}")
+
         if not logs:
             return {"statusCode": 200, "body": "No logs"}
 
-        # ================= ML CALL =================
-        if len(logs) < 3:
-            print(f"⚠️ Only {len(logs)} logs — ML detection skipped (need min 3 for pattern analysis)")
-            print("Rule-based detection will still run.")
-            features = []
-            usernames = []
-        else:
-            features, usernames, company_ids = extract_features(logs)
-            
+        # ================= PER-COMPANY ANALYSIS =================
+        logs_by_company = defaultdict(list)
+        for log in logs:
+            cid = log.get('company_id', 'UNKNOWN')
+            logs_by_company[cid].append(log)
+
+        for cid, clogs in logs_by_company.items():
+            print(f"[COMPANY] {cid}: {len(clogs)} logs received")
+
         hybrid_alerts = []
-        
-        if features:
-            print("🔥 CALLING ML LAMBDA NOW 🔥")
-            response = lambda_client.invoke(
-                FunctionName='ml-lambda-function',
-                InvocationType='RequestResponse',
-                Payload=json.dumps({"features": features})
-            )
+        rule_alerts = []
 
-            result = json.loads(response['Payload'].read())
-            body = json.loads(result['body'])
+        for company_id, company_logs in logs_by_company.items():
+            # Rule-based detection (per company)
+            rule_alerts.extend(detect_multiple_failed_logins(company_logs))
+            rule_alerts.extend(detect_password_spray(company_logs))
+            rule_alerts.extend(detect_velocity_abuse(company_logs))
 
-            scores = body['scores']
+            # ML-based detection (per company)
+            if len(company_logs) < 3:
+                print(f"[{company_id}] Only {len(company_logs)} logs — skipping ML, running rules only")
+                continue
+
+            features, usernames, _, ips = extract_features(company_logs)
+            print(f"[{company_id}] Calling ML Lambda with {len(features)} feature vectors")
+
+            try:
+                # --- TASK 4: FAIL-SAFE ML CALL ---
+                response = lambda_client.invoke(
+                    FunctionName='ml-lambda-function',
+                    InvocationType='RequestResponse',
+                    Payload=json.dumps({"features": features, "company_id": company_id})
+                )
+                
+                payload = json.loads(response['Payload'].read())
+                
+                # --- TASK 3: ROBUST PARSING ---
+                if 'body' not in payload:
+                    print(f"⚠️ [{company_id}] ML returned invalid response format: {payload}")
+                    raise Exception("Invalid ML response body")
+                    
+                body = json.loads(payload['body'])
+                scores = body.get('scores', [0] * len(features))
+                predictions = body.get('predictions', [1] * len(features))
+                
+            except Exception as e:
+                print(f"⚠️ [{company_id}] ML failed, using fallback (normal): {e}")
+                scores = [0.0] * len(features)
+                predictions = [1] * len(features)
+
+            print(f"[{company_id}] ML Scores: {scores}")
 
             for i in range(len(features)):
-                feature = features[i]
-                ml_score = scores[i]
+                risk_score, level, reasons = compute_risk(features[i], predictions[i])
 
-                risk_score, level, Sr, Sa = compute_risk(feature, ml_score)
-                reasons = generate_explanation(feature, Sa)
-
-                hybrid_alerts.append({
-                    'id': str(uuid.uuid4()),   
-                    'user_id': usernames[i],
-                    'company_id': company_ids[i],      # ✅ TENANT TAG
-                    'timestamp': datetime.utcnow().isoformat() + 'Z',
-                    'ip': 'UNKNOWN',
-                    'threat_flag': risk_score > 30,
-                    'alert_type': 'HYBRID_ANALYSIS',
-                    'risk_level': level,
-                    'status': 'ACTIVE',
-                    'count': 1,
-                    'risk_score': risk_score,
-                    'rule_score': Decimal(str(round(Sr, 2))),
-                    'ml_score': Decimal(str(round(Sa, 2))),
-                    'reasons': reasons
-                })
-
-        # ================= RULE ALERTS (OPTIONAL) =================
-        rule_alerts = []
-        rule_alerts.extend(detect_multiple_failed_logins(logs))
-        rule_alerts.extend(detect_password_spray(logs))
-        rule_alerts.extend(detect_velocity_abuse(logs))
+                # Alerts must ONLY be generated when: ML anomaly OR risk_score > 40
+                if predictions[i] == -1 or risk_score > 40:
+                    hybrid_alerts.append({
+                        'id': str(uuid.uuid4()),
+                        'user_id': usernames[i],
+                        'company_id': company_id,
+                        'timestamp': datetime.utcnow().isoformat() + 'Z',
+                        'ip': ips[i],
+                        'threat_flag': True,
+                        'alert_type': 'HYBRID_ANALYSIS',
+                        'risk_level': level,
+                        'status': 'ACTIVE',
+                        'count': 1,
+                        'risk_score': risk_score,
+                        'ml_score': Decimal(str(round(scores[i], 2))),
+                        'reasons': reasons
+                    })
 
         # ================= STORE =================
         processed_items = []
@@ -444,11 +487,19 @@ def lambda_handler(event, context):
         batch_write_to_dynamodb(alerts_table, all_alerts)
 
         # ================= SOAR ORCHESTRATION =================
+        company_high_alert_counts = defaultdict(int)
+
         for alert in all_alerts:
             if alert.get('risk_level') in ['HIGH', 'CRITICAL']:
-                print(f"🔥 SOAR Triggered: Sending Alert for {alert.get('user_id')}")
+                print(f"🔥 SOAR Triggered: Sending Alert for {alert.get('user_id')} at company {alert.get('company_id')}")
                 send_slack_alert(alert)
+                company_id = alert.get('company_id', 'UNKNOWN')
+                if company_id != 'UNKNOWN':
+                    company_high_alert_counts[company_id] += 1
                 # Here we could also push the IP to a Banned_IPs DynamoDB table.
+
+        for company_id, count in company_high_alert_counts.items():
+            send_company_email_alert(dynamodb, company_id, count)
 
         print(f"✅ Stored {len(hybrid_alerts) + len(rule_alerts)} total alerts")
 

@@ -18,6 +18,42 @@ from email.mime.text import MIMEText
 from flask import send_file
 from fpdf import FPDF
 
+from dotenv import load_dotenv
+import os
+
+# LOAD CROSS-ACCOUNT CREDENTIALS (from root .env)
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# INITIALIZE BOTO3 (CROSS-ACCOUNT)
+def get_cross_account_dynamodb():
+    try:
+        sts_client = boto3.client(
+            'sts',
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+        )
+        
+        assumed_role = sts_client.assume_role(
+            RoleArn="arn:aws:iam::502881461360:role/DynamoDBCrossAccountRole",
+            RoleSessionName="BackendSession"
+        )
+        
+        creds = assumed_role['Credentials']
+        return boto3.resource(
+            'dynamodb',
+            region_name='us-east-1',
+            aws_access_key_id=creds['AccessKeyId'],
+            aws_secret_access_key=creds['SecretAccessKey'],
+            aws_session_token=creds['SessionToken']
+        )
+    except Exception as e:
+        print(f"⚠️ Cross-account assumption failed: {e}")
+        return boto3.resource('dynamodb', region_name='us-east-1')
+
+dynamodb = get_cross_account_dynamodb()
+ALERTS_TABLE_NAME = 'SecurityAlerts'
+
 app = Flask(__name__)
 CORS(app)
 
@@ -270,9 +306,6 @@ def send_alert_reminder(company_id):
         return jsonify({"error": str(e)}), 500
 
 
-# INITIALIZE BOTO3
-dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-ALERTS_TABLE_NAME = 'SecurityAlerts'
 
 IP_CACHE = {}
 
@@ -307,20 +340,24 @@ def get_geo_info(ip):
     return {"lat": 0, "lon": 0, "country": "Unknown"}
 
 def format_alert(item):
-    """Format alert to the STANDARDIZED API OUTPUT with GeoIP"""
-    geo = get_geo_info(item.get('ip', 'UNKNOWN'))
+    """Format alert to the STANDARDIZED API OUTPUT with Fast Simulated GeoIP"""
+    # SKIP external API call to avoid 'loading too long' hanging issues
+    # geo = get_geo_info(item.get('ip', 'UNKNOWN'))
     
     return {
         "id": item.get('id', 'unknown'),
+        "company_id": item.get('company_id', 'UNKNOWN'),
         "user_id": item.get('user_id', 'UNKNOWN'),
         "risk_score": int(item.get('risk_score', 0)),
         "risk_level": item.get('risk_level', 'LOW'),
+        "alert_type": item.get('alert_type', 'UNKNOWN'),
         "reasons": item.get('reasons', []),
         "timestamp": item.get('timestamp', ''),
         "ip": item.get('ip', 'UNKNOWN'),
-        "latitude": geo["lat"],
-        "longitude": geo["lon"],
-        "country": geo["country"],
+        # Consistent simulated locations based on IP for UI stability
+        "latitude": float(item.get('latitude', 39.90 + (abs(hash(item.get('ip', ''))) % 10))),
+        "longitude": float(item.get('longitude', 116.40 + (abs(hash(item.get('ip', ''))) % 10))),
+        "country": item.get('country', 'Simulated'),
         "log_sources": item.get('log_sources', ['Custom_Auth_API'])
     }
 
@@ -360,6 +397,13 @@ def get_alerts():
     # Super admin can query any tenant
     if auth_data['role'] == 'super_admin':
         company_id = request.args.get('tenant', 'ALL')
+
+    # Pagination params
+    try:
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+    except (ValueError, TypeError):
+        limit, offset = 50, 0
     
     try:
         table = dynamodb.Table(ALERTS_TABLE_NAME)
@@ -373,11 +417,17 @@ def get_alerts():
                 ScanIndexForward=False,
                 Limit=500
             )
-        alerts = [format_alert(i) for i in response.get('Items', [])]
-        return jsonify(alerts)
+        all_alerts = [format_alert(i) for i in response.get('Items', [])]
+        paginated = all_alerts[offset: offset + limit]
+        return jsonify({
+            "alerts": paginated,
+            "total": len(all_alerts),
+            "limit": limit,
+            "offset": offset
+        })
     except Exception as e:
         print(f"DynamoDB error: {e}")
-        return jsonify(get_mock_alerts()), 200
+        return jsonify({"alerts": get_mock_alerts(), "total": 3, "limit": limit, "offset": 0}), 200
 
 @app.route("/alerts/high", methods=["GET"])
 def get_high_alerts():
@@ -402,6 +452,148 @@ def get_user_alerts(user_id):
         return jsonify(alerts)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# =========================
+# GET /api/me
+# =========================
+@app.route("/api/me", methods=["GET"])
+def api_me():
+    auth = check_auth()
+    if not auth or "error" in auth:
+        return jsonify({"error": auth.get("error") if auth else "Unauthorized"}), 401
+    if auth.get("role") == "super_admin":
+        return jsonify({"company_id": "ALL", "role": "super_admin"}), 200
+    return jsonify({
+        "company_id": auth.get("company_id"),
+        "role": auth.get("role"),
+        "company_name": auth.get("company_name")
+    }), 200
+
+
+# =========================
+# GET /api/dashboard-stats
+# =========================
+@app.route("/api/dashboard-stats", methods=["GET"])
+def api_dashboard_stats():
+    auth = check_auth()
+    if not auth or "error" in auth:
+        return jsonify({"error": auth.get("error") if auth else "Unauthorized"}), 401
+
+    company_id = request.args.get('company_id', auth.get('company_id', 'UNKNOWN'))
+
+    # Tenant isolation: non-admins can only see their own data
+    if auth.get('role') != 'super_admin' and company_id != auth.get('company_id'):
+        return jsonify({"error": "Forbidden"}), 403
+
+    def _build_stats(items):
+        from collections import Counter
+        total = len(items)
+        risk_dist = Counter(i.get('risk_level', 'LOW') for i in items)
+        attack_counter = Counter(i.get('alert_type', 'UNKNOWN') for i in items)
+        unique_ips = len(set(i.get('ip', 'UNKNOWN') for i in items))
+        unique_users = len(set(i.get('user_id', 'UNKNOWN') for i in items))
+        top_attacks = [{"type": k, "count": v} for k, v in attack_counter.most_common(5)]
+        return {
+            "total_alerts": total,
+            "critical_alerts": risk_dist.get('CRITICAL', 0),
+            "high_alerts": risk_dist.get('HIGH', 0),
+            "medium_alerts": risk_dist.get('MEDIUM', 0),
+            "low_alerts": risk_dist.get('LOW', 0),
+            "unique_ips": unique_ips,
+            "unique_users_affected": unique_users,
+            "top_attack_types": top_attacks,
+            "risk_distribution": dict(risk_dist)
+        }
+
+    def _mock_stats():
+        return {
+            "total_alerts": 150, "critical_alerts": 12, "high_alerts": 34,
+            "medium_alerts": 28, "low_alerts": 76, "unique_ips": 23,
+            "unique_users_affected": 8,
+            "top_attack_types": [{"type": "PASSWORD_SPRAY", "count": 45}],
+            "risk_distribution": {"LOW": 76, "MEDIUM": 28, "HIGH": 34, "CRITICAL": 12}
+        }
+
+    try:
+        table = dynamodb.Table(ALERTS_TABLE_NAME)
+        if company_id == 'ALL':
+            response = table.scan()
+        else:
+            response = table.query(
+                IndexName='company_id-timestamp-index',
+                KeyConditionExpression=Key('company_id').eq(company_id),
+                ScanIndexForward=False
+            )
+        items = response.get('Items', [])
+        return jsonify(_build_stats(items)), 200
+    except Exception as e:
+        print(f"Dashboard stats DynamoDB error: {e}")
+        return jsonify(_mock_stats()), 200
+
+
+# =========================
+# GET /api/alerts/timeline
+# =========================
+@app.route("/api/alerts/timeline", methods=["GET"])
+def api_alerts_timeline():
+    auth = check_auth()
+    if not auth or "error" in auth:
+        return jsonify({"error": auth.get("error") if auth else "Unauthorized"}), 401
+
+    company_id = request.args.get('company_id', auth.get('company_id', 'UNKNOWN'))
+
+    if auth.get('role') != 'super_admin' and company_id != auth.get('company_id'):
+        return jsonify({"error": "Forbidden"}), 403
+
+    from collections import defaultdict
+    from datetime import timedelta
+
+    def _build_timeline(items):
+        today = datetime.now(timezone.utc).date()
+        # Initialise all 30 days with zeros
+        buckets = {}
+        for d in range(30):
+            day = (today - timedelta(days=29 - d)).isoformat()
+            buckets[day] = {"date": day, "total": 0, "critical": 0, "high": 0}
+
+        for item in items:
+            ts = item.get('timestamp', '')
+            try:
+                day = datetime.fromisoformat(ts.replace('Z', '+00:00')).date().isoformat()
+            except Exception:
+                continue
+            if day in buckets:
+                buckets[day]['total'] += 1
+                level = item.get('risk_level', 'LOW')
+                if level == 'CRITICAL':
+                    buckets[day]['critical'] += 1
+                elif level == 'HIGH':
+                    buckets[day]['high'] += 1
+
+        return list(buckets.values())
+
+    try:
+        table = dynamodb.Table(ALERTS_TABLE_NAME)
+        if company_id == 'ALL':
+            response = table.scan()
+        else:
+            response = table.query(
+                IndexName='company_id-timestamp-index',
+                KeyConditionExpression=Key('company_id').eq(company_id),
+                ScanIndexForward=False
+            )
+        items = response.get('Items', [])
+        return jsonify(_build_timeline(items)), 200
+    except Exception as e:
+        print(f"Timeline DynamoDB error: {e}")
+        # Return 30 zero-filled days as fallback
+        today = datetime.now(timezone.utc).date()
+        fallback = [
+            {"date": (today - timedelta(days=29 - d)).isoformat(), "total": 0, "critical": 0, "high": 0}
+            for d in range(30)
+        ]
+        return jsonify(fallback), 200
+
 
 @app.route("/api/report", methods=["GET"])
 def generate_pdf_report():
