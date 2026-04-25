@@ -9,7 +9,7 @@ import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps
 
 import {
   fetchCompanies, fetchAlerts, fetchAlertsTimeline,
-  sendAlertReminder, downloadReport,
+  sendAlertReminder, downloadReport, deleteCompany
 } from '../services/api';
 import '../styles/main.css';
 
@@ -254,6 +254,17 @@ export default function SuperAdminDashboard() {
     }
   };
 
+  const handleDeleteCompany = async (companyId) => {
+    if (!window.confirm(`Are you sure you want to permanently delete the company ${companyId}? This action cannot be undone.`)) return;
+    try {
+      await deleteCompany(companyId);
+      setCompanies((prev) => prev.filter(c => c.company_id !== companyId));
+      addToast(`✅ Successfully deleted company ${companyId}`);
+    } catch (err) {
+      addToast(`❌ Failed to delete: ${err.message}`, 'error');
+    }
+  };
+
   const handleLogout = () => { localStorage.clear(); navigate('/login'); };
 
   // Build color map
@@ -351,6 +362,7 @@ export default function SuperAdminDashboard() {
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
                         <button className="btn-action" onClick={() => setSelectedCompany(c)}>📊 View</button>
                         <button className="btn-action btn-action-warn" onClick={() => handleSendAlert(c.company_id)}>📧 Alert</button>
+                        <button className="btn-action btn-action-danger" style={{background: '#ef444433', color: '#ef4444', borderColor: '#ef444466'}} onClick={() => handleDeleteCompany(c.company_id)}>🗑️ Delete</button>
                       </div>
                     </td>
                   </tr>

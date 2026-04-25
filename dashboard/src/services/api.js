@@ -109,3 +109,11 @@ export async function downloadReport(companyId = null) {
   link.click();
   link.remove();
 }
+
+export async function deleteCompany(companyId) {
+  const res = await fetch(`${BASE}/api/companies/${companyId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  return handleResponse(res);
+}

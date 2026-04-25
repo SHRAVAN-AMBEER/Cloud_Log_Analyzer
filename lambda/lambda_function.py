@@ -21,25 +21,27 @@ lambda_client = boto3.client('lambda')
 # Cross-account role ARN
 CROSS_ACCOUNT_ROLE_ARN = "arn:aws:iam::502881461360:role/DynamoDBCrossAccountRole"
 
-# 🔐 Assume role and get DynamoDB access
 def get_dynamodb():
-    sts_client = boto3.client('sts')
+    try:
+        sts_client = boto3.client('sts')
+        cross_account_arn = os.getenv("CROSS_ACCOUNT_ROLE_ARN", CROSS_ACCOUNT_ROLE_ARN)
+        
+        assumed_role = sts_client.assume_role(
+            RoleArn=cross_account_arn,
+            RoleSessionName="LambdaSession"
+        )
 
-    assumed_role = sts_client.assume_role(
-        RoleArn=CROSS_ACCOUNT_ROLE_ARN,
-        RoleSessionName="LambdaSession"
-    )
+        credentials = assumed_role['Credentials']
 
-    credentials = assumed_role['Credentials']
-
-    dynamodb = boto3.resource(
-        'dynamodb',
-        aws_access_key_id=credentials['AccessKeyId'],
-        aws_secret_access_key=credentials['SecretAccessKey'],
-        aws_session_token=credentials['SessionToken']
-    )
-
-    return dynamodb
+        return boto3.resource(
+            'dynamodb',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+    except Exception as e:
+        print(f"⚠️ Cross-account assumption failed. Falling back to Lambda execution role. Error: {e}")
+        return boto3.resource('dynamodb')
 
 # =========================
 # CONFIG & ENV VARS

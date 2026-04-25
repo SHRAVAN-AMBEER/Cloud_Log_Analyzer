@@ -48,7 +48,7 @@ def get_cross_account_dynamodb():
             aws_session_token=creds['SessionToken']
         )
     except Exception as e:
-        print(f"⚠️ Cross-account assumption failed: {e}")
+        print(f"WARNING: Cross-account assumption failed: {e}")
         return boto3.resource('dynamodb', region_name='us-east-1')
 
 dynamodb = get_cross_account_dynamodb()
@@ -305,6 +305,18 @@ def send_alert_reminder(company_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/companies/<company_id>", methods=["DELETE"])
+def delete_company(company_id):
+    auth = check_auth()
+    if not auth or "error" in auth or auth.get("role") != "super_admin":
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        table = dynamodb.Table('Companies')
+        table.delete_item(Key={'company_id': company_id})
+        return jsonify({"message": "Company deleted successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 IP_CACHE = {}
@@ -452,6 +464,80 @@ def get_user_alerts(user_id):
         return jsonify(alerts)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# =========================
+# POST /api/ingest
+# =========================
+@app.route("/api/ingest", methods=["POST"])
+def api_ingest():
+    api_key = request.headers.get("X-API-Key", "").strip()
+    
+    if not api_key:
+        return jsonify({"error": "Missing X-API-Key"}), 401
+
+    try:
+        table = dynamodb.Table('Companies')
+        # Use scan to find the api_key. For production, create a GSI on api_key.
+        response = table.scan(FilterExpression=Attr('api_key').eq(api_key))
+        items = response.get('Items', [])
+        if not items:
+            return jsonify({"error": "Invalid API Key"}), 401
+        
+        company = items[0]
+        company_id = company['company_id']
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Error validating API Key: {tb}")
+        return jsonify({"error": "Internal server error", "traceback": tb}), 500
+    
+    logs = request.get_json()
+    if not logs:
+        return jsonify({"error": "Invalid JSON format"}), 400
+
+    if not isinstance(logs, list):
+        logs = [logs]
+
+    sqs_key_id = os.getenv("SQS_AWS_ACCESS_KEY_ID", os.getenv("AWS_ACCESS_KEY_ID"))
+    sqs_secret = os.getenv("SQS_AWS_SECRET_ACCESS_KEY", os.getenv("AWS_SECRET_ACCESS_KEY"))
+    
+    try:
+        sqs = boto3.client(
+            'sqs', 
+            region_name='us-east-1',
+            aws_access_key_id=sqs_key_id,
+            aws_secret_access_key=sqs_secret
+        )
+        queue_url = os.getenv("SQS_QUEUE_URL")
+    except Exception as e:
+        print(f"Error initializing SQS client: {e}")
+        return jsonify({"error": "Server configuration error"}), 500
+
+    if not queue_url:
+        return jsonify({"error": "SIEM Configuration Error: Missing SQS_QUEUE_URL"}), 500
+
+    sent_count = 0
+    # Process in batches of 10 for SQS
+    for i in range(0, len(logs), 10):
+        chunk = logs[i:i+10]
+        entries = []
+        for j, log in enumerate(chunk):
+            # Inject the verified company_id into the log!
+            log['company_id'] = company_id
+            entries.append({
+                "Id": str(i + j),
+                "MessageBody": json.dumps(log)
+            })
+            
+        try:
+            sqs.send_message_batch(QueueUrl=queue_url, Entries=entries)
+            sent_count += len(chunk)
+        except Exception as e:
+            print(f"Error sending to SQS: {e}")
+            return jsonify({"error": "Failed to forward logs to SIEM core"}), 500
+
+    return jsonify({"message": f"Successfully ingested {sent_count} logs", "company_id": company_id}), 200
+
 
 # =========================
 # GET /api/me
