@@ -1,0 +1,21 @@
+[
+    {
+        "id": "1e512e3e-b7d2-4e79-a5d1-74355084d4ae",
+        "company_id": "HEALTHCARE_852",
+        "user_id": "unknown_attacker",
+        "risk_score": 99,
+        "risk_level": "CRITICAL",
+        "alert_type": "SQL_INJECTION_ATTACK",
+        "reasons": [
+            "local_ingest_simulation"
+        ],
+        "timestamp": "2026-04-24T19:30:46.729273+00:00Z",
+        "ip": "203.0.113.99",
+        "latitude": 44.9,
+        "longitude": 121.4,
+        "country": "Simulated",
+        "log_sources": [
+            "Netlify_Frontend"
+        ]
+    }
+]

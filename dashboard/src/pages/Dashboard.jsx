@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { 
   Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement 
 } from 'chart.js';
+import { Globe, Building, Activity, FileText, ArrowLeft, LogOut } from 'lucide-react';
 
 import { DashboardHeader } from '../components/DashboardHeader';
 import { MetricsRow } from '../components/MetricsRow';
@@ -52,7 +53,7 @@ export default function Dashboard() {
       <div className="dashboard-container" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
         <DashboardHeader />
         <div style={{ textAlign: 'center', marginTop: '2rem' }}>
-          <h2 style={{ fontSize: '2rem', marginBottom: '1rem', color: 'var(--text-light)' }}>🌍 Super Admin: Select Tenant Instance</h2>
+          <h2 style={{ fontSize: '2rem', marginBottom: '1rem', color: 'var(--text-light)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Globe size={32} style={{marginRight: '1rem', color: 'var(--primary-color)'}}/> Super Admin: Select Tenant Instance</h2>
           <p style={{ color: 'var(--text-muted)', marginBottom: '3rem' }}>Select a subscriber to view their isolated intelligence dashboard.</p>
           
           <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -67,7 +68,7 @@ export default function Dashboard() {
                 onMouseOver={e => e.currentTarget.style.borderColor = 'var(--primary-color)'}
                 onMouseOut={e => e.currentTarget.style.borderColor = 'var(--border-color)'}
               >
-                <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{tenant === 'HOSPITAL' ? '🏥' : '🏪'}</div>
+                <div style={{ fontSize: '3rem', marginBottom: '1rem', color: 'var(--accent-blue)' }}>{tenant === 'HOSPITAL' ? <Activity size={48} /> : <Building size={48} />}</div>
                 <h3 style={{ fontSize: '1.5rem', margin: 0, color: 'var(--text-light)' }}>{tenant} Network</h3>
                 <p style={{ color: 'var(--text-muted)', marginTop: '0.5rem', fontSize: '0.9rem' }}>View isolated SIEM data</p>
               </div>
@@ -75,9 +76,9 @@ export default function Dashboard() {
           </div>
           <button 
             onClick={handleLogout}
-            style={{ marginTop: '4rem', padding: '0.75rem 2rem', background: 'transparent', border: '1px solid var(--danger-color)', color: 'var(--danger-color)', borderRadius: '0.5rem', cursor: 'pointer' }}
+            style={{ marginTop: '4rem', padding: '0.75rem 2rem', background: 'transparent', border: '1px solid var(--danger-color)', color: 'var(--danger-color)', borderRadius: '0.5rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
           >
-            Sign Out
+            <LogOut size={18} /> Sign Out
           </button>
         </div>
       </div>
@@ -111,15 +112,15 @@ export default function Dashboard() {
         </h2>
         <div>
           {role === 'super_admin' && (
-            <button onClick={() => setSelectedTenant(null)} className="btn-primary" style={{ marginRight: '1rem', background: 'var(--bg-card)' }}>
-              ← Back to Tenants
+            <button onClick={() => setSelectedTenant(null)} className="btn-primary" style={{ marginRight: '1rem', background: 'var(--bg-card)', color: 'var(--text-main)', border: '1px solid var(--border-color)' }}>
+              <ArrowLeft size={16} /> Back to Tenants
             </button>
           )}
-          <button onClick={() => downloadReport(selectedTenant)} className="btn-primary" style={{ marginRight: '1rem', background: '#3b82f6' }}>
-            📄 Download Threat Report
+          <button onClick={() => downloadReport(selectedTenant)} className="btn-primary" style={{ marginRight: '1rem' }}>
+            <FileText size={18} /> Download Threat Report
           </button>
-          <button onClick={handleLogout} className="btn-primary" style={{ background: 'var(--danger-color)' }}>
-            Logout
+          <button onClick={handleLogout} className="btn-danger">
+            <LogOut size={18} /> Logout
           </button>
         </div>
       </div>

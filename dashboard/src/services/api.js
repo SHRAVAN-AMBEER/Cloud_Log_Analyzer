@@ -15,7 +15,13 @@ function authHeaders() {
 
 async function handleResponse(res) {
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('siem_token');
+      window.location.href = '/login';
+    }
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
   return data;
 }
 

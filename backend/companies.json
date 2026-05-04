@@ -1,0 +1,14 @@
+[
+    {
+        "company_id": "HEALTHCARE_852",
+        "company_name": "Digital Health Portfolio",
+        "api_key": "sk-live-ae2dd157-ccfb-43cf-82ea-9964784dcda5",
+        "email": "rahularra30@gmail.com",
+        "password_hash": "$2b$12$Lm9ZHvCg0Y98fjhTGrdlj..uoGfdvDk08EowALY8bodFyt9yGZhQa",
+        "registered_at": "2026-04-24T18:14:44.637630+00:00Z",
+        "industry": "HEALTHCARE",
+        "alert_email_enabled": true,
+        "status": "active",
+        "last_login": "2026-04-24T18:17:08.779951+00:00Z"
+    }
+]

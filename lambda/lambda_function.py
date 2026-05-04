@@ -13,6 +13,9 @@ import uuid
 import urllib.request
 import urllib.error
 import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # AWS Clients
 s3 = boto3.client('s3')
@@ -46,25 +49,72 @@ def get_dynamodb():
 # =========================
 # CONFIG & ENV VARS
 # =========================
-# Required Lambda Environment Variables:
-# SLACK_WEBHOOK_URL — Slack incoming webhook
-# CROSS_ACCOUNT_ROLE_ARN — IAM role for DynamoDB cross-account access
-# DEFAULT_COMPANY_ID — fallback company_id for logs without one
-# SES_SENDER_EMAIL — verified SES sender email
-# DASHBOARD_URL — URL of the React dashboard for email links
+# Get Email Config from environment variables
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")  # Your Gmail
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "") # Your App Password
+SES_SENDER_EMAIL = os.getenv("SES_SENDER_EMAIL", SMTP_EMAIL)
+DEFAULT_COMPANY_ID = "TECH_007"
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:5173")
 
 FAILED_LOGIN_THRESHOLD = 3
 PASSWORD_SPRAY_THRESHOLD = 5
 MAX_LOGINS_PER_MINUTE = 10
-
-# Get Slack Webhook from environment variable (Security Best Practice)
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-DEFAULT_COMPANY_ID = "TECH_007"
-SES_SENDER_EMAIL = "security@example.com"
-DASHBOARD_URL = "http://localhost:5173"
 # =========================
 # UTILS
 # =========================
+GEO_CACHE = {}
+COMPANY_CACHE = {} # Cache for company contact details
+
+def get_company_contact(dynamodb, company_id):
+    """Fetch registered email for a specific company with caching"""
+    if not company_id or company_id == 'UNKNOWN':
+        return None
+        
+    if company_id in COMPANY_CACHE:
+        return COMPANY_CACHE[company_id]
+        
+    try:
+        table = dynamodb.Table('Companies')
+        response = table.get_item(Key={'company_id': company_id})
+        item = response.get('Item')
+        if item and item.get('email'):
+            contact = {'email': item.get('email')}
+            COMPANY_CACHE[company_id] = contact
+            return contact
+    except Exception as e:
+        print(f"⚠️ Error fetching contact for {company_id}: {e}")
+        
+    return None
+
+def get_real_geo(ip):
+    """Real-time Geo-IP lookup with in-memory caching and CIDR cleaning"""
+    if not ip or ip == "UNKNOWN" or "->" in ip:
+        if "->" in ip:
+            return get_real_geo(ip.split("->")[-1].strip())
+        return 0.0, 0.0, "Unknown"
+
+    # Clean IP: Strip CIDR notation (e.g., "104.0.0.0/8" -> "104.0.0.0")
+    clean_ip = ip.split('/')[0].strip()
+
+    if clean_ip in GEO_CACHE:
+        return GEO_CACHE[clean_ip]
+
+    try:
+        # Using ip-api.com (Free for non-commercial use)
+        url = f"http://ip-api.com/json/{clean_ip}?fields=status,message,country,lat,lon"
+        with urllib.request.urlopen(url, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            if data.get('status') == 'success':
+                res = (float(data['lat']), float(data['lon']), data['country'])
+                GEO_CACHE[clean_ip] = res
+                return res
+    except Exception as e:
+        print(f"⚠️ Geo-IP lookup failed for {clean_ip}: {e}")
+    
+    return 0.0, 0.0, "Lookup Failed"
+
 def batch_write_to_dynamodb(table, items):
     if not items:
         return 0
@@ -89,12 +139,23 @@ class UniversalLogParser:
         if not line or not line.strip(): return None
         try:
             log_dict = json.loads(line)
-            if 'username' in log_dict and 'ip' in log_dict and 'status' in log_dict:
-                log_dict['log_source'] = log_dict.get('log_source', 'Custom_Auth_API')
-                return log_dict
+            # Normalize fields
+            username = log_dict.get('username') or log_dict.get('user_id')
+            ip = log_dict.get('ip') or log_dict.get('source_ip')
+            status = log_dict.get('status') or log_dict.get('login_status')
+
+            if username and ip and status:
+                return {
+                    'user_id': username,
+                    'ip': ip,
+                    'status': status,
+                    'log_source': log_dict.get('log_source', 'Custom_Auth_API'),
+                    'company_id': log_dict.get('company_id'),
+                    'timestamp': log_dict.get('timestamp')
+                }
             if 'userIdentity' in log_dict and 'eventName' in log_dict:
                 return {
-                    'username': log_dict['userIdentity'].get('userName', 'UNKNOWN'), 'ip': log_dict.get('sourceIPAddress', 'UNKNOWN'),
+                    'user_id': log_dict['userIdentity'].get('userName', 'UNKNOWN'), 'ip': log_dict.get('sourceIPAddress', 'UNKNOWN'),
                     'status': 'success' if log_dict.get('responseElements', {}).get('ConsoleLogin') == 'Success' else 'failure',
                     'timestamp': log_dict.get('eventTime', datetime.utcnow().isoformat() + 'Z'), 'log_source': 'AWS_CloudTrail',
                     'company_id': log_dict.get('company_id')
@@ -105,7 +166,7 @@ class UniversalLogParser:
         if apache_match:
             d = apache_match.groupdict()
             return {
-                'username': d['user'] if d['user'] != '-' else 'UNKNOWN', 'ip': d['ip'],
+                'user_id': d['user'] if d['user'] != '-' else 'UNKNOWN', 'ip': d['ip'],
                 'status': 'success' if d['status'].startswith('2') or d['status'].startswith('3') else 'failure',
                 'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Apache_WebServer',
                 'company_id': 'UNKNOWN'
@@ -114,7 +175,7 @@ class UniversalLogParser:
         if syslog_match:
             d = syslog_match.groupdict()
             return {
-                'username': d['user'], 'ip': d['ip'],
+                'user_id': d['user'], 'ip': d['ip'],
                 'status': 'success' if 'accept' in d['status'].lower() or 'success' in d['status'].lower() else 'failure',
                 'timestamp': datetime.utcnow().isoformat() + 'Z', 'log_source': 'Cisco_Firewall',
                 'company_id': 'UNKNOWN'
@@ -140,32 +201,55 @@ class UniversalLogParser:
             company_id = DEFAULT_COMPANY_ID
             
         parsed['company_id'] = company_id
+        # Ensure unique timestamp exists for rule-based detection
+        if not parsed.get('timestamp'):
+            # Add a tiny random jitter to ensure unique timestamps in sorting
+            import time, random
+            jitter = random.random() / 1000.0
+            parsed['timestamp'] = datetime.fromtimestamp(time.time() + jitter).isoformat() + 'Z'
+            
         return parsed
 
-def send_slack_alert(alert):
-    if not SLACK_WEBHOOK_URL or "YOUR_DUMMY_URL_HERE" in SLACK_WEBHOOK_URL:
-        print("⚠️ Slack webhook not configured. Skipping alert.")
+def send_email_alert(alert, recipient_email):
+    """Send a professional security alert via free SMTP (e.g. Gmail)"""
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        print("⚠️ SMTP credentials not configured in Lambda env vars. Skipping email.")
+        return
+        
+    if not recipient_email:
+        print("⚠️ No recipient email found. Skipping alert.")
         return
 
+    subject = f"🚨 SECURITY ALERT: {alert.get('alert_type')} Detected for {alert.get('company_id')}"
+    
+    body_text = (
+        f"Critical Security Alert\n"
+        f"======================\n"
+        f"Alert Type: {alert.get('alert_type')}\n"
+        f"Company ID: {alert.get('company_id')}\n"
+        f"Risk Level: {alert.get('risk_level')}\n"
+        f"Risk Score: {alert.get('risk_score')}\n"
+        f"User: {alert.get('user_id')}\n"
+        f"IP Source: {alert.get('ip')}\n"
+        f"Reasons: {', '.join(alert.get('reasons', []))}\n\n"
+        f"Please login to your dashboard to investigate: {DASHBOARD_URL}\n"
+    )
+
+    msg = MIMEMultipart()
+    msg['From'] = SMTP_EMAIL
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body_text, 'plain'))
+
     try:
-        payload = {
-            "text": f"🚨 *CRITICAL SECURITY ALERT* 🚨\n"
-                    f"*Company:* `{alert.get('company_id', 'UNKNOWN')}`\n"
-                    f"*User:* `{alert.get('user_id', 'UNKNOWN')}`\n"
-                    f"*IP:* `{alert.get('ip', 'UNKNOWN')}`\n"
-                    f"*Risk Level:* {alert.get('risk_level')}\n"
-                    f"*Risk Score:* {alert.get('risk_score', 'N/A')}\n"
-                    f"*Attack Pattern:* {', '.join(alert.get('reasons', []))}"
-        }
-        req = urllib.request.Request(
-            SLACK_WEBHOOK_URL,
-            data=json.dumps(payload).encode('utf-8'),
-            headers={'Content-Type': 'application/json'}
-        )
-        urllib.request.urlopen(req, timeout=3)
-        print("✅ Slack alert dispatched")
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print(f"✅ SMTP Security Email sent to {recipient_email}")
     except Exception as e:
-        print(f"❌ Slack error: {e}")
+        print(f"❌ SMTP Email error for {recipient_email}: {e}")
 
 def send_company_email_alert(dynamodb, company_id, alert_count):
     print(f"Lean: Skipping SES Email for now. Would send {alert_count} alerts for company {company_id}.")
@@ -181,21 +265,27 @@ def detect_multiple_failed_logins(logs):
 
     for log in logs:
         if log.get('status') == 'failure':
-            key = (log.get('username', 'UNKNOWN'), log.get('ip', 'UNKNOWN'))
+            user = log.get('user_id', 'UNKNOWN')
+            ip = log.get('ip', 'UNKNOWN')
+            key = (user, ip)
             failed_count[key] += 1
             ip_company[key] = log.get('company_id', 'UNKNOWN')
 
     for (user, ip), count in failed_count.items():
         if count >= FAILED_LOGIN_THRESHOLD:
+            lat, lon, country = get_real_geo(ip)
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': user,
-                'company_id': ip_company.get((user, ip), 'UNKNOWN'),  # ✅
+                'company_id': ip_company.get((user, ip), 'UNKNOWN'),
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': ip,
+                'latitude': Decimal(str(lat)),
+                'longitude': Decimal(str(lon)),
+                'country': country,
                 'alert_type': 'MULTIPLE_FAILED_LOGINS',
-                'count': count,
-                'risk_score': 60,
+                'count': Decimal(str(count)),
+                'risk_score': Decimal('60'),
                 'risk_level': 'MEDIUM',
                 'reasons': ['rule_based_multiple_failed']
             })
@@ -210,20 +300,25 @@ def detect_password_spray(logs):
     for log in logs:
         if log.get('status') == 'failure':
             ip = log.get('ip', 'UNKNOWN')
-            ip_users[ip].add(log.get('username', 'UNKNOWN'))
+            user = log.get('user_id', 'UNKNOWN')
+            ip_users[ip].add(user)
             ip_company[ip] = log.get('company_id', 'UNKNOWN')
 
     for ip, users in ip_users.items():
         if len(users) >= PASSWORD_SPRAY_THRESHOLD:
+            lat, lon, country = get_real_geo(ip)
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': 'SYSTEM',
                 'company_id': ip_company.get(ip, 'UNKNOWN'),
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': ip,
+                'latitude': Decimal(str(lat)),
+                'longitude': Decimal(str(lon)),
+                'country': country,
                 'alert_type': 'PASSWORD_SPRAY',
-                'count': len(users),
-                'risk_score': 90,
+                'count': Decimal(str(len(users))),
+                'risk_score': Decimal('90'),
                 'risk_level': 'CRITICAL',
                 'reasons': ['rule_based_password_spray']
             })
@@ -237,15 +332,21 @@ def detect_velocity_abuse(logs):
 
     for log in logs:
         try:
-            ts = datetime.fromisoformat(log.get('timestamp', '').replace('Z', '+00:00'))
-            user = log.get('username', 'UNKNOWN')
+            ts_str = log.get('timestamp', '')
+            if 'Z' in ts_str:
+                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            else:
+                ts = datetime.now(timezone.utc)
+            user = log.get('user_id', 'UNKNOWN')
             user_times[user].append(ts)
             user_company[user] = log.get('company_id', 'UNKNOWN')
         except Exception:
             continue
 
+    # Lower threshold for demo if needed
+    THRESHOLD = MAX_LOGINS_PER_MINUTE if len(logs) > 5 else 3
     for user, times in user_times.items():
-        if len(times) > MAX_LOGINS_PER_MINUTE:
+        if len(times) >= THRESHOLD:
             alerts.append({
                 'id': str(uuid.uuid4()),
                 'user_id': user,
@@ -253,11 +354,61 @@ def detect_velocity_abuse(logs):
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
                 'ip': 'UNKNOWN',
                 'alert_type': 'VELOCITY_ABUSE',
-                'count': len(times),
-                'risk_score': 85,
+                'count': Decimal(str(len(times))),
+                'risk_score': Decimal('85'),
                 'risk_level': 'HIGH',
                 'reasons': ['rule_based_velocity_abuse']
             })
+
+    return alerts
+
+def detect_impossible_travel(logs):
+    alerts = []
+    user_ip_times = defaultdict(list)
+    user_company = {}
+
+    for log in logs:
+        try:
+            ts = datetime.fromisoformat(log.get('timestamp', '').replace('Z', '+00:00'))
+            user = log.get('user_id', 'UNKNOWN')
+            ip = log.get('ip', 'UNKNOWN')
+            if user != 'UNKNOWN':
+                user_ip_times[user].append((ts, ip))
+                user_company[user] = log.get('company_id', 'UNKNOWN')
+        except Exception as e:
+            print(f"Error parsing log for travel detection: {e}")
+            continue
+
+    for user, events in user_ip_times.items():
+        if len(events) < 2: continue
+        
+        # Sort by timestamp
+        events.sort()
+        for i in range(len(events) - 1):
+            t1, ip1 = events[i]
+            t2, ip2 = events[i+1]
+            
+            # If same user, different IP, within 15 minutes = Impossible Travel
+            # For testing: if timestamps are identical (time_diff == 0), it still counts!
+            time_diff = abs((t2 - t1).total_seconds())
+            if ip1 != ip2 and time_diff < 900: # 15 minutes
+                lat, lon, country = get_real_geo(ip2)
+                alerts.append({
+                    'id': str(uuid.uuid4()),
+                    'user_id': user,
+                    'company_id': user_company.get(user, 'UNKNOWN'),
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'ip': f"{ip1} -> {ip2}",
+                    'latitude': Decimal(str(lat)),
+                    'longitude': Decimal(str(lon)),
+                    'country': country,
+                    'alert_type': 'IMPOSSIBLE_TRAVEL',
+                    'count': Decimal('1'),
+                    'risk_score': Decimal('95'),
+                    'risk_level': 'CRITICAL',
+                    'reasons': [f"User accessed from {ip1} and {ip2} within {int(time_diff/60)} minutes"]
+                })
+                break # Only one alert per batch per user
 
     return alerts
 
@@ -404,6 +555,7 @@ def lambda_handler(event, context):
             rule_alerts.extend(detect_multiple_failed_logins(company_logs))
             rule_alerts.extend(detect_password_spray(company_logs))
             rule_alerts.extend(detect_velocity_abuse(company_logs))
+            rule_alerts.extend(detect_impossible_travel(company_logs))
 
             # ML-based detection (per company)
             if len(company_logs) < 3:
@@ -444,18 +596,22 @@ def lambda_handler(event, context):
 
                 # Alerts must ONLY be generated when: ML anomaly OR risk_score > 40
                 if predictions[i] == -1 or risk_score > 40:
+                    lat, lon, country = get_real_geo(ips[i])
                     hybrid_alerts.append({
                         'id': str(uuid.uuid4()),
                         'user_id': usernames[i],
                         'company_id': company_id,
                         'timestamp': datetime.utcnow().isoformat() + 'Z',
                         'ip': ips[i],
+                        'latitude': Decimal(str(lat)),
+                        'longitude': Decimal(str(lon)),
+                        'country': country,
                         'threat_flag': True,
                         'alert_type': 'HYBRID_ANALYSIS',
                         'risk_level': level,
                         'status': 'ACTIVE',
-                        'count': 1,
-                        'risk_score': risk_score,
+                        'count': Decimal('1'),
+                        'risk_score': Decimal(str(risk_score)),
                         'ml_score': Decimal(str(round(scores[i], 2))),
                         'reasons': reasons
                     })
@@ -466,7 +622,7 @@ def lambda_handler(event, context):
         for log in logs:
             processed_items.append({
                 'log_id': str(uuid.uuid4()),          # ✅ PRIMARY KEY — required
-                'user_id': log.get('username', 'UNKNOWN'),
+                'user_id': log.get('user_id', 'UNKNOWN'),
                 'timestamp': log.get('timestamp', datetime.utcnow().isoformat() + 'Z'),
                 'ip': log.get('ip', 'UNKNOWN'),
                 'company_id': log.get('company_id', 'UNKNOWN'),  # ✅ TENANT TAG
@@ -489,19 +645,17 @@ def lambda_handler(event, context):
         batch_write_to_dynamodb(alerts_table, all_alerts)
 
         # ================= SOAR ORCHESTRATION =================
-        company_high_alert_counts = defaultdict(int)
-
         for alert in all_alerts:
             if alert.get('risk_level') in ['HIGH', 'CRITICAL']:
-                print(f"🔥 SOAR Triggered: Sending Alert for {alert.get('user_id')} at company {alert.get('company_id')}")
-                send_slack_alert(alert)
                 company_id = alert.get('company_id', 'UNKNOWN')
-                if company_id != 'UNKNOWN':
-                    company_high_alert_counts[company_id] += 1
-                # Here we could also push the IP to a Banned_IPs DynamoDB table.
-
-        for company_id, count in company_high_alert_counts.items():
-            send_company_email_alert(dynamodb, company_id, count)
+                print(f"🔥 SOAR Triggered: Sending Alert for {alert.get('user_id')} at company {company_id}")
+                
+                # Fetch company contact email
+                contact = get_company_contact(dynamodb, company_id)
+                if contact and contact.get('email'):
+                    send_email_alert(alert, contact['email'])
+                else:
+                    print(f"⚠️ No email contact for {company_id}, skipping SOAR.")
 
         print(f"✅ Stored {len(hybrid_alerts) + len(rule_alerts)} total alerts")
 

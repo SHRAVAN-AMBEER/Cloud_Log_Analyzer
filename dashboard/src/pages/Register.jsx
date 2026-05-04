@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { registerCompany } from '../services/api';
+import { Shield, CheckCircle, AlertTriangle, Copy, Check, ArrowRight } from 'lucide-react';
 import '../styles/main.css';
 
 const INDUSTRIES = [
@@ -67,7 +68,9 @@ export default function Register() {
       {apiKeyModal && (
         <div className="modal-overlay">
           <div className="modal-box">
-            <div style={{ fontSize: '3rem', textAlign: 'center' }}>🎉</div>
+            <div className="modal-header" style={{ justifyContent: 'center', marginBottom: '0.5rem', fontSize: '3rem' }}>
+              <CheckCircle size={56} />
+            </div>
             <h2 style={{ textAlign: 'center', color: '#f8fafc', margin: '0.5rem 0' }}>
               Welcome to the platform!
             </h2>
@@ -76,7 +79,7 @@ export default function Register() {
             </p>
 
             <div className="apikey-warning">
-              ⚠️ <strong>Save this API key now — it will never be shown again!</strong>
+              <AlertTriangle /> <strong>Save this API key now — it will never be shown again!</strong>
             </div>
 
             <div className="apikey-box">
@@ -86,10 +89,10 @@ export default function Register() {
             </div>
 
             <button className="modal-btn-copy" onClick={copyKey}>
-              {copied ? '✅ Copied!' : '📋 Copy API Key'}
+              {copied ? <><Check /> Copied!</> : <><Copy /> Copy API Key</>}
             </button>
             <button className="modal-btn-go" onClick={() => navigate('/login')}>
-              Go to Login →
+              Go to Login <ArrowRight size={16} />
             </button>
           </div>
         </div>
@@ -97,7 +100,7 @@ export default function Register() {
 
       <div className="login-card" style={{ maxWidth: '520px' }}>
         <div className="login-logo">
-          <span className="login-shield">🛡️</span>
+          <Shield size={48} />
           <h1 className="login-title">Create an Account</h1>
           <p className="login-subtitle">Join the Cloud Log Analyzer platform</p>
         </div>
@@ -169,13 +172,13 @@ export default function Register() {
           </div>
 
           <button type="submit" className="login-btn" disabled={loading}>
-            {loading ? <span className="login-spinner" /> : 'Register Company →'}
+            {loading ? <span className="login-spinner" /> : <>Register Company <ArrowRight size={18} /></>}
           </button>
         </form>
 
         <div className="login-footer">
           Already have an account?{' '}
-          <Link to="/login" className="login-link">Sign in →</Link>
+          <Link to="/login" className="login-link">Sign in <ArrowRight size={14} style={{verticalAlign: 'middle'}} /></Link>
         </div>
       </div>
     </div>

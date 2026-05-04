@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { loginUser, loginWithApiKey } from '../services/api';
+import { Shield, Key, Zap, ArrowRight, AlertCircle } from 'lucide-react';
 import '../styles/main.css';
 
 export default function Login() {
@@ -73,7 +74,7 @@ export default function Login() {
       <div className="login-card">
         {/* Logo */}
         <div className="login-logo">
-          <span className="login-shield">🛡️</span>
+          <Shield size={48} />
           <h1 className="login-title">Cloud Log Analyzer</h1>
           <p className="login-subtitle">Enterprise Multi-Tenant SIEM Platform</p>
         </div>
@@ -85,19 +86,19 @@ export default function Login() {
             onClick={() => { setTab('credentials'); setError(''); }}
             type="button"
           >
-            🔑 Credentials
+            <Key size={16} /> Credentials
           </button>
           <button
             className={`login-tab ${tab === 'apikey' ? 'active' : ''}`}
             onClick={() => { setTab('apikey'); setError(''); }}
             type="button"
           >
-            ⚡ API Key
+            <Zap size={16} /> API Key
           </button>
         </div>
 
         {/* Error banner */}
-        {error && <div className="login-error">{error}</div>}
+        {error && <div className="login-error"><AlertCircle /> {error}</div>}
 
         <form onSubmit={handleSubmit} className="login-form">
           {tab === 'credentials' ? (
@@ -142,7 +143,7 @@ export default function Login() {
             {loading ? (
               <span className="login-spinner" />
             ) : (
-              'Authenticate →'
+              <>Authenticate <ArrowRight size={18} /></>
             )}
           </button>
         </form>

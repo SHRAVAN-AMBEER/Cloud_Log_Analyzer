@@ -6,6 +6,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { ComposableMap, Geographies, Geography, Marker } from 'react-simple-maps';
+import { Building, Activity, AlertTriangle, Network, Globe, TrendingUp, Shield, LogOut, X, ArrowRight, BarChart2, Mail, Trash2 } from 'lucide-react';
 
 import {
   fetchCompanies, fetchAlerts, fetchAlertsTimeline,
@@ -79,8 +80,8 @@ function CompanyPanel({ company, onClose }) {
     <div className="side-panel-overlay" onClick={onClose}>
       <div className="side-panel" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-          <h2 style={{ margin: 0, color: '#f8fafc' }}>{company.company_name}</h2>
-          <button className="btn-ghost" onClick={onClose}>✕</button>
+          <h2 style={{ margin: 0, color: '#f8fafc', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Building size={24} /> {company.company_name}</h2>
+          <button className="btn-ghost" onClick={onClose}><X size={20} /></button>
         </div>
         <p style={{ color: '#94a3b8' }}>Industry: <strong style={{ color: '#f8fafc' }}>{company.industry}</strong></p>
         <p style={{ color: '#94a3b8' }}>Company ID: <code style={{ color: '#60a5fa' }}>{company.company_id}</code></p>
@@ -96,7 +97,7 @@ function CompanyPanel({ company, onClose }) {
             navigate(`/dashboard?company=${company.company_id}`);
           }}
         >
-          📊 Open Dashboard →
+          <BarChart2 size={16} /> Open Dashboard <ArrowRight size={16} />
         </button>
       </div>
     </div>
@@ -115,7 +116,7 @@ function GlobalThreatMap({ alertsByCompany, companyColorMap }) {
 
   return (
     <div className="chart-panel" style={{ gridColumn: '1 / -1' }}>
-      <h2>🌍 Global Threat Map — All Companies</h2>
+      <h2><Globe size={24} /> Global Threat Map — All Companies</h2>
       <div style={{ position: 'relative', background: '#0a0f1e', borderRadius: 10, overflow: 'hidden' }}>
         <ComposableMap projectionConfig={{ scale: 140 }} style={{ width: '100%', height: 400 }}>
           <Geographies geography={GEO_URL}>
@@ -160,6 +161,33 @@ function GlobalThreatMap({ alertsByCompany, companyColorMap }) {
   );
 }
 
+// ── Global Threat Intel Feed ────────────────────────────────────
+function GlobalThreatFeed({ allAlerts, companyColorMap }) {
+  const criticalAlerts = allAlerts.filter(a => ['CRITICAL', 'HIGH'].includes(a.risk_level)).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 10);
+  
+  if (criticalAlerts.length === 0) return null;
+
+  return (
+    <div className="threat-feed-container" style={{ marginBottom: '2.5rem', background: 'rgba(239, 68, 68, 0.05)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '12px', padding: '1rem', display: 'flex', alignItems: 'center', gap: '1rem', overflow: 'hidden' }}>
+      <div style={{ fontWeight: 'bold', color: '#ef4444', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '0.5rem', zIndex: 2, background: 'var(--bg-dark)', paddingRight: '1rem' }}>
+        <Activity size={18} /> GLOBAL THREAT FEED:
+      </div>
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        <div className="marquee-scroll" style={{ display: 'flex', gap: '3rem', whiteSpace: 'nowrap' }}>
+          {criticalAlerts.map((a, i) => (
+            <div key={i} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <span style={{ color: companyColorMap[a._company] || '#fff', fontWeight: 'bold' }}>[{a._company}]</span>
+              <span style={{ color: '#fca5a5' }}>{a.timestamp?.slice(11, 19)}</span>
+              <span style={{ color: '#f8fafc' }}>{a.alert_type} from</span>
+              <span style={{ color: '#ef4444', fontWeight: 'bold' }}>{a.ip}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Platform Timeline ─────────────────────────────────────────
 function PlatformTimeline({ timelineByCompany, companyColorMap }) {
   const companies = Object.keys(timelineByCompany);
@@ -185,7 +213,7 @@ function PlatformTimeline({ timelineByCompany, companyColorMap }) {
 
   return (
     <div className="chart-panel" style={{ gridColumn: '1 / -1' }}>
-      <h2>📈 Platform-Wide Alert Timeline (30 days)</h2>
+      <h2><TrendingUp size={24} /> Platform-Wide Alert Timeline (30 days)</h2>
       <div className="chart-wrapper" style={{ height: 260 }}>
         <Line data={{ labels, datasets }} options={opts} />
       </div>
@@ -248,9 +276,9 @@ export default function SuperAdminDashboard() {
   const handleSendAlert = async (companyId) => {
     try {
       await sendAlertReminder(companyId);
-      addToast(`✅ Alert reminder sent to ${companyId}`);
+      addToast(`Alert reminder sent to ${companyId}`, 'success');
     } catch (err) {
-      addToast(`❌ ${err.message}`, 'error');
+      addToast(`${err.message}`, 'error');
     }
   };
 
@@ -259,9 +287,9 @@ export default function SuperAdminDashboard() {
     try {
       await deleteCompany(companyId);
       setCompanies((prev) => prev.filter(c => c.company_id !== companyId));
-      addToast(`✅ Successfully deleted company ${companyId}`);
+      addToast(`Successfully deleted company ${companyId}`, 'success');
     } catch (err) {
-      addToast(`❌ Failed to delete: ${err.message}`, 'error');
+      addToast(`Failed to delete: ${err.message}`, 'error');
     }
   };
 
@@ -295,28 +323,31 @@ export default function SuperAdminDashboard() {
 
       {/* ── Top Bar ── */}
       <div className="topbar">
-        <div>
-          <h1 className="topbar-title">🛡️ Cloud Log Analyzer — Super Admin Console</h1>
-          <p className="topbar-sub">Platform-wide threat intelligence & tenant management</p>
+        <div className="topbar-left">
+          <Shield size={36} color="var(--primary-color)" />
+          <div>
+            <h1 className="topbar-title">Cloud Log Analyzer — Super Admin Console</h1>
+            <p className="topbar-sub">Platform-wide threat intelligence & tenant management</p>
+          </div>
         </div>
         <div className="topbar-right">
           <LiveClock />
-          <button className="btn-danger" onClick={handleLogout}>Logout</button>
+          <button className="btn-danger" onClick={handleLogout}><LogOut size={16} /> Logout</button>
         </div>
       </div>
 
       {/* ── Section 1: Platform Overview ── */}
       <div className="metrics-row">
-        <OverviewCard label="Total Companies" value={totalCompanies} icon="🏢" accent="#3b82f6" />
-        <OverviewCard label="Alerts (24h)" value={alertsLast24h} icon="📊" accent="#f97316" />
-        <OverviewCard label="Critical (24h)" value={criticalLast24h} icon="🚨" accent="#ef4444" />
-        <OverviewCard label="Active Attack IPs" value={activeIPs} icon="🌐" accent="#a855f7" />
+        <OverviewCard label="Total Companies" value={totalCompanies} icon={<Building size={24} />} accent="#3b82f6" />
+        <OverviewCard label="Alerts (24h)" value={alertsLast24h} icon={<Activity size={24} />} accent="#f97316" />
+        <OverviewCard label="Critical (24h)" value={criticalLast24h} icon={<AlertTriangle size={24} />} accent="#ef4444" />
+        <OverviewCard label="Active Attack IPs" value={activeIPs} icon={<Network size={24} />} accent="#a855f7" />
       </div>
 
       {/* ── Section 2: Companies Table ── */}
       <div className="data-table-container" style={{ marginBottom: '2rem' }}>
         <div className="table-header">
-          <h2>🏢 Registered Companies</h2>
+          <h2><Building size={20} /> Registered Companies</h2>
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table className="styled-table">
@@ -360,9 +391,9 @@ export default function SuperAdminDashboard() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button className="btn-action" onClick={() => setSelectedCompany(c)}>📊 View</button>
-                        <button className="btn-action btn-action-warn" onClick={() => handleSendAlert(c.company_id)}>📧 Alert</button>
-                        <button className="btn-action btn-action-danger" style={{background: '#ef444433', color: '#ef4444', borderColor: '#ef444466'}} onClick={() => handleDeleteCompany(c.company_id)}>🗑️ Delete</button>
+                        <button className="btn-action" onClick={() => setSelectedCompany(c)}><BarChart2 size={14} /> View</button>
+                        <button className="btn-action btn-action-warn" onClick={() => handleSendAlert(c.company_id)}><Mail size={14} /> Alert</button>
+                        <button className="btn-action btn-action-danger" style={{background: '#ef444433', color: '#ef4444', borderColor: '#ef444466'}} onClick={() => handleDeleteCompany(c.company_id)}><Trash2 size={14} /> Delete</button>
                       </div>
                     </td>
                   </tr>
@@ -372,6 +403,8 @@ export default function SuperAdminDashboard() {
           </table>
         </div>
       </div>
+
+      <GlobalThreatFeed allAlerts={allAlerts.map(a => ({ ...a, _company: Object.keys(alertsByCompany).find(c => alertsByCompany[c].includes(a)) }))} companyColorMap={companyColorMap} />
 
       {/* ── Section 3: Global Threat Map ── */}
       <div className="charts-grid" style={{ marginBottom: '2rem' }}>

@@ -17,6 +17,15 @@ import bcrypt
 from email.mime.text import MIMEText
 from flask import send_file
 from fpdf import FPDF
+from decimal import Decimal
+
+# Custom JSON Encoder for DynamoDB Decimals
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return int(obj) if obj % 1 == 0 else float(obj)
+        return super(DecimalEncoder, self).default(obj)
+
 
 from dotenv import load_dotenv
 import os
@@ -48,8 +57,14 @@ def get_cross_account_dynamodb():
             aws_session_token=creds['SessionToken']
         )
     except Exception as e:
-        print(f"WARNING: Cross-account assumption failed: {e}")
-        return boto3.resource('dynamodb', region_name='us-east-1')
+        print(f"WARNING: Cross-account assumption failed: {e}. Falling back to local .env credentials.")
+        # Fallback to local credentials if cross-account fails
+        return boto3.resource(
+            'dynamodb',
+            region_name='us-east-1',
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+        )
 
 dynamodb = get_cross_account_dynamodb()
 ALERTS_TABLE_NAME = 'SecurityAlerts'
@@ -431,14 +446,19 @@ def get_alerts():
             )
         all_alerts = [format_alert(i) for i in response.get('Items', [])]
         paginated = all_alerts[offset: offset + limit]
-        return jsonify({
-            "alerts": paginated,
-            "total": len(all_alerts),
-            "limit": limit,
-            "offset": offset
-        })
+        # Use custom encoder to handle Decimals
+        return app.response_class(
+            response=json.dumps({
+                "alerts": paginated,
+                "total": len(all_alerts),
+                "limit": limit,
+                "offset": offset
+            }, cls=DecimalEncoder),
+            status=200,
+            mimetype='application/json'
+        )
     except Exception as e:
-        print(f"DynamoDB error: {e}")
+        print(f"DynamoDB alerts error: {e}")
         return jsonify({"alerts": get_mock_alerts(), "total": 3, "limit": limit, "offset": 0}), 200
 
 @app.route("/alerts/high", methods=["GET"])
@@ -464,6 +484,46 @@ def get_user_alerts(user_id):
         return jsonify(alerts)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/logs", methods=["GET"])
+def get_logs():
+    auth_data = check_auth()
+    if not auth_data or "error" in auth_data:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    company_id = auth_data['company_id']
+    if auth_data['role'] == 'super_admin':
+        company_id = request.args.get('tenant', company_id)
+
+    limit = int(request.args.get('limit', 50))
+    
+    try:
+        table = dynamodb.Table('ProcessedLogs')
+        try:
+            # Try efficient GSI query first
+            response = table.query(
+                IndexName='company_id-timestamp-index',
+                KeyConditionExpression=Key('company_id').eq(company_id),
+                ScanIndexForward=False, # Newest first
+                Limit=limit
+            )
+        except Exception as e:
+            print(f"⚠️ GSI Query failed for logs, falling back to scan: {e}")
+            # Fallback to scan if index isn't ready/exists
+            response = table.scan(
+                FilterExpression=Key('company_id').eq(company_id),
+                Limit=limit
+            )
+            
+        items = response.get('Items', [])
+        return app.response_class(
+            response=json.dumps(items, cls=DecimalEncoder),
+            status=200,
+            mimetype='application/json'
+        )
+    except Exception as e:
+        print(f"Error fetching logs: {e}")
+        return jsonify([])
 
 # =========================
 # POST /api/ingest
@@ -491,9 +551,15 @@ def api_ingest():
         print(f"Error validating API Key: {tb}")
         return jsonify({"error": "Internal server error", "traceback": tb}), 500
     
-    logs = request.get_json()
-    if not logs:
+    data = request.get_json()
+    if not data:
         return jsonify({"error": "Invalid JSON format"}), 400
+
+    # Robust handling for both {"logs": [...]} and [...] formats
+    if isinstance(data, dict) and "logs" in data:
+        logs = data["logs"]
+    else:
+        logs = data
 
     if not isinstance(logs, list):
         logs = [logs]
@@ -611,9 +677,16 @@ def api_dashboard_stats():
                 ScanIndexForward=False
             )
         items = response.get('Items', [])
-        return jsonify(_build_stats(items)), 200
+        stats = _build_stats(items)
+        return app.response_class(
+            response=json.dumps(stats, cls=DecimalEncoder),
+            status=200,
+            mimetype='application/json'
+        )
     except Exception as e:
+        import traceback
         print(f"Dashboard stats DynamoDB error: {e}")
+        print(traceback.format_exc())
         return jsonify(_mock_stats()), 200
 
 
@@ -719,17 +792,43 @@ def generate_pdf_report():
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt=f"Security Intelligence Report: {target_tenant}", ln=True, align='C')
     
+    # Use IST instead of UTC for PDF generation timestamp
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
     pdf.set_font("Arial", '', 12)
-    pdf.cell(200, 10, txt=f"Generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}", ln=True, align='C')
+    pdf.cell(200, 10, txt=f"Generated on: {datetime.now(ist_tz).strftime('%Y-%m-%d %I:%M:%S %p IST')}", ln=True, align='C')
     pdf.ln(10)
     
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(200, 10, txt="Executive Summary", ln=True)
     pdf.set_font("Arial", '', 12)
-    pdf.cell(200, 10, txt=f"Total Security Alerts: {total_alerts}", ln=True)
-    pdf.cell(200, 10, txt=f"High & Critical Risk Alerts: {high_critical}", ln=True)
+    pdf.cell(200, 10, txt=f"Total Security Attacks Logged: {total_alerts}", ln=True)
+    pdf.cell(200, 10, txt=f"High & Critical Risk Attacks: {high_critical}", ln=True)
     pdf.cell(200, 10, txt=f"Unique Compromised Users: {unique_users}", ln=True)
     pdf.ln(10)
+
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(200, 10, txt="Attack Analysis & Explanations", ln=True)
+    pdf.set_font("Arial", '', 10)
+    pdf.multi_cell(0, 7, txt="The following is a breakdown of the attacks observed in the environment. Immediate action is recommended for High and Critical threats to prevent data breaches.")
+    pdf.ln(5)
+
+    # Detailed Attack Explanations
+    attack_types = set([a.get('alert_type') for a in filtered])
+    for atype in attack_types:
+        pdf.set_font("Arial", 'B', 11)
+        pdf.cell(200, 8, txt=f"-> {atype}", ln=True)
+        pdf.set_font("Arial", '', 10)
+        if atype == 'IMPOSSIBLE_TRAVEL':
+            pdf.multi_cell(0, 6, txt="Explanation: A user successfully logged in from two distant geographic locations within an impossibly short timeframe. This strongly indicates a stolen session token or compromised credentials.\nImmediate Step: Force password reset for the affected users and revoke all active session tokens immediately.")
+        elif atype == 'PASSWORD_SPRAY':
+            pdf.multi_cell(0, 6, txt="Explanation: An attacker attempted to log in to many different accounts using the same common password. This is designed to avoid account lockouts.\nImmediate Step: Implement or enforce Multi-Factor Authentication (MFA) and block the source IP address in your firewall.")
+        elif atype == 'VELOCITY_ABUSE':
+            pdf.multi_cell(0, 6, txt="Explanation: A high volume of rapid authentication attempts were observed. This is typical of bot activity or automated credential stuffing scripts.\nImmediate Step: Implement strict rate limiting on your authentication endpoints and deploy CAPTCHA challenges.")
+        elif atype == 'MULTIPLE_FAILED_LOGINS':
+            pdf.multi_cell(0, 6, txt="Explanation: Repeated failed login attempts against a single user account, indicating a targeted brute-force attack.\nImmediate Step: Ensure account lockout policies are enforced after a set number of failed attempts.")
+        else:
+            pdf.multi_cell(0, 6, txt="Explanation: An anomalous event was detected that deviates from normal baseline activity.\nImmediate Step: Investigate the source IP and user activity logs in detail.")
+        pdf.ln(4)
 
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(200, 10, txt="Recent Threat Detections", ln=True)
@@ -737,7 +836,7 @@ def generate_pdf_report():
     
     # Add a simple table-like list of the top 10 most recent alerts
     for a in filtered[:10]:
-        pdf.cell(200, 8, txt=f"[{a.get('risk_level')}] User: {a.get('user_id')} | IP: {a.get('ip')} | Type: {a.get('alert_type')}", ln=True)
+        pdf.cell(200, 6, txt=f"[{a.get('risk_level')}] User: {a.get('user_id')} | IP: {a.get('ip')} | Type: {a.get('alert_type')}", ln=True)
         
     pdf.ln(10)
     pdf.set_font("Arial", 'I', 10)
