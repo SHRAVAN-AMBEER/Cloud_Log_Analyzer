@@ -64,7 +64,7 @@ export async function fetchMe() {
 export async function fetchAlerts(companyId = null, limit = 50, offset = 0) {
   let url = `${BASE}/alerts?limit=${limit}&offset=${offset}`;
   if (companyId && companyId !== 'ALL') url += `&tenant=${companyId}`;
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetch(url, { headers: authHeaders(), cache: 'no-store' });
   return handleResponse(res);
 }
 
@@ -72,7 +72,7 @@ export async function fetchAlerts(companyId = null, limit = 50, offset = 0) {
 
 export async function fetchDashboardStats(companyId) {
   const param = companyId ? `?company_id=${companyId}` : '';
-  const res = await fetch(`${BASE}/api/dashboard-stats${param}`, { headers: authHeaders() });
+  const res = await fetch(`${BASE}/api/dashboard-stats${param}`, { headers: authHeaders(), cache: 'no-store' });
   return handleResponse(res);
 }
 
@@ -80,7 +80,7 @@ export async function fetchDashboardStats(companyId) {
 
 export async function fetchAlertsTimeline(companyId) {
   const param = companyId ? `?company_id=${companyId}` : '';
-  const res = await fetch(`${BASE}/api/alerts/timeline${param}`, { headers: authHeaders() });
+  const res = await fetch(`${BASE}/api/alerts/timeline${param}`, { headers: authHeaders(), cache: 'no-store' });
   return handleResponse(res);
 }
 

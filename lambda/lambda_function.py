@@ -51,9 +51,9 @@ def get_dynamodb():
 # =========================
 # Get Email Config from environment variables
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")  # Your Gmail
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "") # Your App Password
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_EMAIL = os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_USER", "")  # Your Gmail
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_PASS", "") # Your App Password
 SES_SENDER_EMAIL = os.getenv("SES_SENDER_EMAIL", SMTP_EMAIL)
 DEFAULT_COMPANY_ID = "TECH_007"
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:5173")
@@ -84,7 +84,19 @@ def get_company_contact(dynamodb, company_id):
             COMPANY_CACHE[company_id] = contact
             return contact
     except Exception as e:
-        print(f"⚠️ Error fetching contact for {company_id}: {e}")
+        print(f"⚠️ Error fetching contact with assumed role: {e}")
+        try:
+            print("🔄 Falling back to Lambda's local execution role for Companies table...")
+            local_dynamo = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+            table = local_dynamo.Table('Companies')
+            response = table.get_item(Key={'company_id': company_id})
+            item = response.get('Item')
+            if item and item.get('email'):
+                contact = {'email': item.get('email')}
+                COMPANY_CACHE[company_id] = contact
+                return contact
+        except Exception as fallback_e:
+            print(f"❌ Fallback also failed: {fallback_e}")
         
     return None
 
@@ -217,8 +229,10 @@ def send_email_alert(alert, recipient_email):
         return
         
     if not recipient_email:
-        print("⚠️ No recipient email found. Skipping alert.")
+        print("⚠️ No recipient email found for this company. Skipping alert.")
         return
+        
+    print(f"📧 Preparing to send alert to registered email: {recipient_email} using SMTP user: {SMTP_EMAIL} via Port {SMTP_PORT}")
 
     subject = f"🚨 SECURITY ALERT: {alert.get('alert_type')} Detected for {alert.get('company_id')}"
     
@@ -242,11 +256,15 @@ def send_email_alert(alert, recipient_email):
     msg.attach(MIMEText(body_text, 'plain'))
 
     try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.send_message(msg)
         print(f"✅ SMTP Security Email sent to {recipient_email}")
     except Exception as e:
         print(f"❌ SMTP Email error for {recipient_email}: {e}")

@@ -435,7 +435,9 @@ def get_alerts():
     try:
         table = dynamodb.Table(ALERTS_TABLE_NAME)
         if company_id == 'ALL':
-            response = table.scan(Limit=500)
+            response = table.scan(Limit=1000)
+            items = response.get('Items', [])
+            items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         else:
             # USE THE GSI — do NOT use scan()
             response = table.query(
@@ -444,7 +446,9 @@ def get_alerts():
                 ScanIndexForward=False,
                 Limit=500
             )
-        all_alerts = [format_alert(i) for i in response.get('Items', [])]
+            items = response.get('Items', [])
+            
+        all_alerts = [format_alert(i) for i in items]
         paginated = all_alerts[offset: offset + limit]
         # Use custom encoder to handle Decimals
         return app.response_class(
